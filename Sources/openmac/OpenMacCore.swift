@@ -29,9 +29,15 @@ struct GotoOptions: Codable, Equatable {
     var waitUntil: WaitUntilMode?
     var timeout: Int?
 
+    var resolvedWaitUntil: WaitUntilMode {
+        waitUntil ?? .domcontentloaded
+    }
+
+    var resolvedTimeout: Int {
+        timeout ?? 30_000
+    }
+
     func validated() throws -> GotoOptions {
-        let resolvedWaitUntil = waitUntil ?? .domcontentloaded
-        let resolvedTimeout = timeout ?? 30_000
         guard resolvedTimeout >= 0 else {
             throw APIRequestError.badRequest("timeout must be a non-negative integer")
         }
