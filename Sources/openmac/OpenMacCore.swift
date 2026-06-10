@@ -235,11 +235,14 @@ enum APIRequestDecoder {
                 throw APIRequestError.badRequest("GET /api/web-content requires ?url=")
             }
 
-            let waitUntil = try WaitUntilMode(value: queryItem(named: "waitUntil", in: request.queryItems))
+            let waitUntilQuery = queryItem(named: "waitUntil", in: request.queryItems)
+            let waitUntil = try WaitUntilMode(value: waitUntilQuery)
             let timeout = try parseTimeout(queryItem(named: "timeout", in: request.queryItems))
             return WebContentRequestPayload(
                 url: url,
-                gotoOptions: GotoOptions(waitUntil: waitUntil, timeout: timeout)
+                gotoOptions: waitUntilQuery == nil && timeout == nil
+                    ? nil
+                    : GotoOptions(waitUntil: waitUntil, timeout: timeout)
             )
         case .post:
             let payload = try decodeJSON(WebContentRequestPayload.self, from: request.body)

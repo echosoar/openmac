@@ -54,6 +54,7 @@ import Testing
     let payload = try APIRequestDecoder.decodeWebContentRequest(from: request)
 
     #expect(payload.url == "https://example.com")
+    #expect(payload.gotoOptions == nil)
     let options = try payload.resolvedOptions()
     #expect(options.waitUntil == .domcontentloaded)
     #expect(options.timeout == 30_000)
