@@ -169,15 +169,8 @@ enum HTTPRequestParser {
         }
 
         let target = String(requestLineParts[1])
-        let contentLength = headerLines.dropFirst().reduce(into: [String: String]()) { partialResult, line in
-            guard let separator = line.firstIndex(of: ":") else {
-                return
-            }
-
-            let key = line[..<separator].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            let value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespacesAndNewlines)
-            partialResult[key] = value
-        }["content-length"].flatMap(Int.init) ?? 0
+        let headers = parseHeaders(from: Array(headerLines.dropFirst()))
+        let contentLength = headers["content-length"].flatMap(Int.init) ?? 0
 
         let totalLength = separatorRange.upperBound + contentLength
         guard buffer.count >= totalLength else {
@@ -194,19 +187,23 @@ enum HTTPRequestParser {
                 target: target,
                 path: path,
                 queryItems: urlComponents?.queryItems ?? [],
-                headers: headerLines.dropFirst().reduce(into: [String: String]()) { partialResult, line in
-                    guard let separator = line.firstIndex(of: ":") else {
-                        return
-                    }
-
-                    let key = line[..<separator].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                    let value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespacesAndNewlines)
-                    partialResult[key] = value
-                },
+                headers: headers,
                 body: Data(body)
             ),
             consumedLength: totalLength
         )
+    }
+
+    private static func parseHeaders(from headerLines: [String]) -> [String: String] {
+        headerLines.reduce(into: [String: String]()) { partialResult, line in
+            guard let separator = line.firstIndex(of: ":") else {
+                return
+            }
+
+            let key = line[..<separator].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespacesAndNewlines)
+            partialResult[key] = value
+        }
     }
 }
 

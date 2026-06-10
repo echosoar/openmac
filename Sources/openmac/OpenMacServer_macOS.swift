@@ -357,16 +357,15 @@ private final class WebContentRenderer: NSObject, WKNavigationDelegate {
     }
 
     private func finish(with result: Result<String, Error>) {
-        timer?.invalidate()
-        timer = nil
-        webView?.navigationDelegate = nil
-        webView = nil
-
         guard let continuation else {
             return
         }
 
         self.continuation = nil
+        timer?.invalidate()
+        timer = nil
+        webView?.navigationDelegate = nil
+        webView = nil
         continuation.resume(with: result)
     }
 
@@ -390,18 +389,12 @@ private final class WebContentRenderer: NSObject, WKNavigationDelegate {
 
             const OriginalXHR = window.XMLHttpRequest;
             if (OriginalXHR) {
-                function TrackedXHR() {
-                    const xhr = new OriginalXHR();
-                    const originalSend = xhr.send;
-                    xhr.send = function (...args) {
-                        increment();
-                        xhr.addEventListener('loadend', decrement, { once: true });
-                        return originalSend.apply(xhr, args);
-                    };
-                    return xhr;
-                }
-                TrackedXHR.prototype = OriginalXHR.prototype;
-                window.XMLHttpRequest = TrackedXHR;
+                const originalSend = OriginalXHR.prototype.send;
+                OriginalXHR.prototype.send = function (...args) {
+                    increment();
+                    this.addEventListener('loadend', decrement, { once: true });
+                    return originalSend.apply(this, args);
+                };
             }
         })();
         """
