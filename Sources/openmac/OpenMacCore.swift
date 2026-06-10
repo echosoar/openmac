@@ -157,7 +157,7 @@ enum HTTPRequestParser {
             throw APIRequestError.badRequest("Invalid HTTP header encoding")
         }
 
-        let headerLines = headerText.split(whereSeparator: \ .isNewline).map(String.init)
+        let headerLines = headerText.split(whereSeparator: \.isNewline).map(String.init)
         guard let requestLine = headerLines.first else {
             throw APIRequestError.badRequest("Missing HTTP request line")
         }
