@@ -179,7 +179,12 @@ enum HTTPRequestParser {
 
         let body = buffer[separatorRange.upperBound..<totalLength]
         let urlComponents = URLComponents(string: target)
-        let path = urlComponents?.path.isEmpty == false ? (urlComponents?.path ?? target) : target
+        let path: String
+        if let parsedPath = urlComponents?.path, !parsedPath.isEmpty {
+            path = parsedPath
+        } else {
+            path = target
+        }
 
         return (
             request: HTTPRequestMessage(

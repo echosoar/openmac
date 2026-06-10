@@ -207,7 +207,7 @@ private struct ImageDataLoader {
             let (data, _) = try await URLSession.shared.data(from: url)
             return data
         case let .base64(string):
-            let cleaned = string.contains(",") ? String(string.split(separator: ",", maxSplits: 1).last ?? "") : string
+            let cleaned = stripDataURIPrefix(from: string)
             guard let data = Data(base64Encoded: cleaned) else {
                 throw APIRequestError.badRequest("base64 must be valid base64-encoded image data")
             }
@@ -215,6 +215,14 @@ private struct ImageDataLoader {
         case let .file(path):
             return try Data(contentsOf: URL(fileURLWithPath: path))
         }
+    }
+
+    private func stripDataURIPrefix(from string: String) -> String {
+        guard string.contains(",") else {
+            return string
+        }
+
+        return String(string.split(separator: ",", maxSplits: 1).last ?? "")
     }
 }
 
