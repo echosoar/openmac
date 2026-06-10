@@ -439,7 +439,7 @@ struct OpenMacView: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
-        .padding(CGFloat(16))
+        .padding(16)
         .frame(width: 320)
     }
 }
