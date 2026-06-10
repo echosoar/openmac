@@ -54,8 +54,9 @@ import Testing
     let payload = try APIRequestDecoder.decodeWebContentRequest(from: request)
 
     #expect(payload.url == "https://example.com")
-    #expect(payload.resolvedOptions.resolvedWaitUntil == .domcontentloaded)
-    #expect(payload.resolvedOptions.resolvedTimeout == 30_000)
+    let options = try payload.resolvedOptions()
+    #expect(options.waitUntil == .domcontentloaded)
+    #expect(options.timeout == 30_000)
 }
 
 @Test func decodesPostWebContentRequestOptions() throws {
@@ -71,8 +72,9 @@ import Testing
     let payload = try APIRequestDecoder.decodeWebContentRequest(from: request)
 
     #expect(payload.url == "https://example.com")
-    #expect(payload.resolvedOptions.resolvedWaitUntil == .networkidle2)
-    #expect(payload.resolvedOptions.resolvedTimeout == 1234)
+    let options = try payload.resolvedOptions()
+    #expect(options.waitUntil == .networkidle2)
+    #expect(options.timeout == 1234)
 }
 
 @Test func rejectsInvalidWaitUntilValue() throws {
@@ -86,6 +88,21 @@ import Testing
         ],
         headers: [:],
         body: Data()
+    )
+
+    #expect(throws: APIRequestError.self) {
+        _ = try APIRequestDecoder.decodeWebContentRequest(from: request)
+    }
+}
+
+@Test func rejectsNegativeTimeoutInPostWebContentRequest() throws {
+    let request = HTTPRequestMessage(
+        method: .post,
+        target: "/api/web-content",
+        path: "/api/web-content",
+        queryItems: [],
+        headers: ["content-type": "application/json"],
+        body: Data("{\"url\":\"https://example.com\",\"gotoOptions\":{\"timeout\":-1}}".utf8)
     )
 
     #expect(throws: APIRequestError.self) {

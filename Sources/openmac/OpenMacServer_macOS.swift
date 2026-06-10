@@ -191,7 +191,7 @@ private struct OpenMacRequestRouter {
             throw APIRequestError.badRequest("url must be a valid absolute URL")
         }
 
-        let html = try await WebContentRenderer().renderHTML(from: url, options: payload.resolvedOptions)
+        let html = try await WebContentRenderer().renderHTML(from: url, options: try payload.resolvedOptions())
         return HTTPResponseBuilder.json(body: APIResponseBody(html: html))
     }
 }
@@ -226,9 +226,10 @@ private struct OCRService {
         }
 
         var lines = [String]()
+        var recognitionError: Error?
         let request = VNRecognizeTextRequest { request, error in
             if let error {
-                NSLog("Vision OCR error: %@", error.localizedDescription)
+                recognitionError = error
                 return
             }
 
@@ -240,6 +241,9 @@ private struct OCRService {
 
         let handler = VNImageRequestHandler(cgImage: cgImage)
         try handler.perform([request])
+        if let recognitionError {
+            throw recognitionError
+        }
         return OCRResult(lines: lines)
     }
 }

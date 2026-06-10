@@ -29,12 +29,14 @@ struct GotoOptions: Codable, Equatable {
     var waitUntil: WaitUntilMode?
     var timeout: Int?
 
-    var resolvedWaitUntil: WaitUntilMode {
-        waitUntil ?? .domcontentloaded
-    }
+    func validated() throws -> GotoOptions {
+        let resolvedWaitUntil = waitUntil ?? .domcontentloaded
+        let resolvedTimeout = timeout ?? 30_000
+        guard resolvedTimeout >= 0 else {
+            throw APIRequestError.badRequest("timeout must be a non-negative integer")
+        }
 
-    var resolvedTimeout: Int {
-        timeout ?? 30_000
+        return GotoOptions(waitUntil: resolvedWaitUntil, timeout: resolvedTimeout)
     }
 }
 
@@ -76,8 +78,8 @@ struct WebContentRequestPayload: Codable, Equatable {
     var url: String
     var gotoOptions: GotoOptions?
 
-    var resolvedOptions: GotoOptions {
-        gotoOptions ?? GotoOptions(waitUntil: .domcontentloaded, timeout: 30_000)
+    func resolvedOptions() throws -> GotoOptions {
+        try gotoOptions?.validated() ?? GotoOptions(waitUntil: .domcontentloaded, timeout: 30_000).validated()
     }
 }
 
@@ -104,7 +106,7 @@ struct APIResponseBody: Encodable, Equatable {
     }
 }
 
-enum APIRequestError: Error, Equatable {
+enum APIRequestError: Error, Equatable, LocalizedError {
     case badRequest(String)
     case notFound(String)
     case methodNotAllowed(String)
@@ -131,6 +133,10 @@ enum APIRequestError: Error, Equatable {
             let .internalError(message):
             return message
         }
+    }
+
+    var errorDescription: String? {
+        message
     }
 }
 
@@ -234,8 +240,7 @@ enum APIRequestDecoder {
             }
 
             if let gotoOptions = payload.gotoOptions {
-                _ = gotoOptions.resolvedWaitUntil
-                _ = gotoOptions.resolvedTimeout
+                _ = try gotoOptions.validated()
             }
 
             return payload
