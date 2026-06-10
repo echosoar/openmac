@@ -258,6 +258,7 @@ private struct OCRService {
 
 @MainActor
 private final class WebContentRenderer: NSObject, WKNavigationDelegate {
+    private let networkIdleThreshold: TimeInterval = 0.5
     private var webView: WKWebView?
     private var continuation: CheckedContinuation<String, Error>?
     private var timer: Timer?
@@ -327,7 +328,7 @@ private final class WebContentRenderer: NSObject, WKNavigationDelegate {
             let threshold = waitUntil == .networkidle0 ? 0 : 2
             if state.readyState == "complete" && state.inflight <= threshold {
                 if let idleStart {
-                    if Date().timeIntervalSince(idleStart) >= 0.5 {
+                    if Date().timeIntervalSince(idleStart) >= networkIdleThreshold {
                         finish(with: .success(state.html))
                     }
                 } else {
