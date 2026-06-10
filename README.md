@@ -1,2 +1,10 @@
 # openmac
-Turn the various capabilities of the Mac system into APIs and Skills
+
+Turn the various capabilities of the Mac system into APIs and Skills.
+
+## Endpoints
+
+- `POST /api/ocr` with JSON `{ "url": "..." }`, `{ "base64": "..." }`, or `{ "file": "/local/path" }`
+- `GET /api/ocr?url=...`
+- `POST /api/web-content` with JSON `{ "url": "...", "gotoOptions": { "waitUntil": "domcontentloaded|networkidle2|networkidle0", "timeout": 30000 } }`
+- `GET /api/web-content?url=...&waitUntil=...&timeout=...`
