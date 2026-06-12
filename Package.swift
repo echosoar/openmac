@@ -13,5 +13,5 @@ let package = Package(
             dependencies: ["openmac"]
         ),
     ],
-    swiftLanguageVersions: [.v5]
+    swiftLanguageVersions: [.version("5")]
 )
