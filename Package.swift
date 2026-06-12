@@ -1,4 +1,4 @@
-// swift-tools-version: 6.3
+// swift-tools-version: 5.10
 
 import PackageDescription
 
@@ -13,5 +13,5 @@ let package = Package(
             dependencies: ["openmac"]
         ),
     ],
-    swiftLanguageModes: [.v6]
+    swiftLanguageVersions: [.v5]
 )

@@ -4,20 +4,13 @@ Turn the various capabilities of the Mac system into APIs and Skills.
 
 ## Build
 
-Build and test the Swift package:
+This repository is a standalone macOS app. Open the Xcode project directly:
 
 ```sh
-swift build
-swift test
+open openmac.xcodeproj
 ```
 
-Run the macOS app from the package entry point:
-
-```sh
-swift run
-```
-
-Build the macOS app with Xcode's project file on macOS:
+Build from the command line on macOS:
 
 ```sh
 xcodebuild -project openmac.xcodeproj -scheme openmac -configuration Debug CODE_SIGNING_ALLOWED=NO build
