@@ -552,31 +552,98 @@ private struct TranslationService {
     }
 }
 
+/// Ensures a `CheckedContinuation` is resumed exactly once. Resuming a checked
+/// continuation twice traps, and here several paths (success, error, timeout)
+/// can race to finish.
+@MainActor
+private final class ContinuationBox {
+    private var continuation: CheckedContinuation<String, Error>?
+
+    init(_ continuation: CheckedContinuation<String, Error>) {
+        self.continuation = continuation
+    }
+
+    /// Returns true if this call actually resumed the continuation.
+    @discardableResult
+    func resume(with result: Result<String, Error>) -> Bool {
+        guard let continuation else {
+            return false
+        }
+        self.continuation = nil
+        continuation.resume(with: result)
+        return true
+    }
+}
+
 /// Bridges the SwiftUI-hosted Translation session to an async/await call site.
 ///
 /// `Translation.framework` only exposes a `TranslationSession` through the
 /// `.translationTask` SwiftUI modifier, which must be attached to a live view.
-/// Since the HTTP handler runs outside any view hierarchy, we host a 1x1
-/// off-screen window, run the translation, and resume a continuation when the
-/// session reports its result.
+/// Since the HTTP handler runs outside any view hierarchy, we host a tiny,
+/// fully transparent on-screen window (off-screen windows do not reliably fire
+/// SwiftUI's appearance / `.translationTask`), run the translation, and resume
+/// a continuation when the session reports its result. A timeout guarantees the
+/// request always gets a response even if the framework stalls (e.g. waiting on
+/// a language pack download).
 @available(macOS 15, *)
 @MainActor
 private final class TranslationBridge {
     static let shared = TranslationBridge()
 
-    func translate(text: String, configuration: TranslationSession.Configuration) async throws -> String {
-        var window: NSWindow?
-        defer { window?.close() }
+    private let timeout: TimeInterval = 20
 
-        return try await withCheckedThrowingContinuation { continuation in
-            let view = TranslationBridgeView(text: text, configuration: configuration) { result in
-                continuation.resume(with: result)
+    func translate(text: String, configuration: TranslationSession.Configuration) async throws -> String {
+        openmacLog("Translate: begin (text length \(text.count))")
+
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+            let box = ContinuationBox(continuation)
+            var window: NSWindow?
+            var timeoutTask: Task<Void, Never>?
+
+            let finish: (Result<String, Error>) -> Void = { result in
+                guard box.resume(with: result) else {
+                    return
+                }
+                timeoutTask?.cancel()
+                window?.orderOut(nil)
+                window?.close()
+                window = nil
+                switch result {
+                case let .success(value):
+                    openmacLog("Translate: success (\(value.count) chars)")
+                case let .failure(error):
+                    openmacLog("Translate: failed — \(error.localizedDescription)")
+                }
             }
+
+            let view = TranslationBridgeView(text: text, configuration: configuration) { result in
+                finish(result)
+            }
+
             let hosting = NSHostingController(rootView: view)
-            let hostWindow = NSWindow(contentViewController: hosting)
-            hostWindow.setFrame(NSRect(x: -9999, y: -9999, width: 1, height: 1), display: false)
-            hostWindow.orderFront(nil)
+            let hostWindow = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 1, height: 1),
+                styleMask: [.borderless],
+                backing: .buffered,
+                defer: false
+            )
+            hostWindow.contentViewController = hosting
+            hostWindow.alphaValue = 0
+            hostWindow.isOpaque = false
+            hostWindow.backgroundColor = .clear
+            hostWindow.ignoresMouseEvents = true
+            hostWindow.level = .floating
+            // Show without activating the app or stealing key focus.
+            hostWindow.orderFrontRegardless()
             window = hostWindow
+            openmacLog("Translate: host window presented, awaiting translationTask")
+
+            timeoutTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: UInt64(self.timeout * 1_000_000_000))
+                finish(.failure(APIRequestError.internalError(
+                    "Translation timed out after \(Int(self.timeout))s. The language pair may not be installed — open the macOS Translate app once to download it."
+                )))
+            }
         }
     }
 }
@@ -593,12 +660,17 @@ private struct TranslationBridgeView: View {
         Color.clear
             .frame(width: 1, height: 1)
             .translationTask(configuration) { session in
-                guard !triggered else { return }
+                guard !triggered else {
+                    return
+                }
                 triggered = true
+                openmacLog("Translate: translationTask fired, calling session.translate")
                 do {
                     let response = try await session.translate(text)
+                    openmacLog("Translate: session.translate returned")
                     completion(.success(response.targetText))
                 } catch {
+                    openmacLog("Translate: session.translate threw — \(error.localizedDescription)")
                     completion(.failure(APIRequestError.internalError("Translation failed: \(error.localizedDescription)")))
                 }
             }
