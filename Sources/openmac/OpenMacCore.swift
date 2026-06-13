@@ -98,18 +98,28 @@ struct HTTPRequestMessage: Equatable {
     var body: Data
 }
 
-struct APIResponseBody: Encodable, Equatable {
+/// The payload-specific portion of a response (the `data` object). Unused
+/// fields are omitted from the encoded JSON (synthesized Encodable skips nil
+/// optionals), so an empty instance encodes to `{}`.
+struct APIResponseData: Encodable, Equatable {
     let text: String?
     let lines: [String]?
     let html: String?
-    let error: String?
 
-    init(text: String? = nil, lines: [String]? = nil, html: String? = nil, error: String? = nil) {
+    init(text: String? = nil, lines: [String]? = nil, html: String? = nil) {
         self.text = text
         self.lines = lines
         self.html = html
-        self.error = error
     }
+}
+
+/// Uniform envelope returned by every endpoint:
+/// `{ success, timeCost (ms), data, message }`.
+struct APIResponse: Encodable, Equatable {
+    let success: Bool
+    let timeCost: Int
+    let data: APIResponseData
+    let message: String
 }
 
 struct TranslateRequestPayload: Codable, Equatable {
@@ -396,10 +406,21 @@ enum APIRequestDecoder {
 }
 
 enum HTTPResponseBuilder {
-    static func json(statusCode: Int = 200, body: APIResponseBody) -> Data {
+    /// Build a success response: `success=true`, the given `data`, empty message.
+    static func success(statusCode: Int = 200, timeCost: Int, data: APIResponseData) -> Data {
+        encode(statusCode: statusCode, response: APIResponse(success: true, timeCost: timeCost, data: data, message: ""))
+    }
+
+    /// Build an error response: `success=false`, empty `data` object, `message`.
+    static func failure(statusCode: Int, timeCost: Int, message: String) -> Data {
+        encode(statusCode: statusCode, response: APIResponse(success: false, timeCost: timeCost, data: APIResponseData(), message: message))
+    }
+
+    static func encode(statusCode: Int, response: APIResponse) -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        let bodyData = (try? encoder.encode(body)) ?? Data("{\"error\":\"Encoding error\"}".utf8)
+        let fallback = "{\"data\":{},\"message\":\"Encoding error\",\"success\":false,\"timeCost\":0}"
+        let bodyData = (try? encoder.encode(response)) ?? Data(fallback.utf8)
         return build(statusCode: statusCode, contentType: "application/json; charset=utf-8", body: bodyData)
     }
 

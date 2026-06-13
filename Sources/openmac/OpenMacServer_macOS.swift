@@ -227,17 +227,17 @@ private final class ConnectionHandler {
                 }
             } catch let requestError as APIRequestError {
                 openmacLog("Parse error \(requestError.statusCode): \(requestError.message)")
-                self.respond(with: HTTPResponseBuilder.json(statusCode: requestError.statusCode, body: APIResponseBody(error: requestError.message)))
+                self.respond(with: HTTPResponseBuilder.failure(statusCode: requestError.statusCode, timeCost: 0, message: requestError.message))
                 return
             } catch {
                 openmacLog("Parse error 500: \(error.localizedDescription)")
-                self.respond(with: HTTPResponseBuilder.json(statusCode: 500, body: APIResponseBody(error: error.localizedDescription)))
+                self.respond(with: HTTPResponseBuilder.failure(statusCode: 500, timeCost: 0, message: error.localizedDescription))
                 return
             }
 
             if let error {
                 openmacLog("Receive error: \(error.localizedDescription)")
-                self.respond(with: HTTPResponseBuilder.json(statusCode: 500, body: APIResponseBody(error: error.localizedDescription)))
+                self.respond(with: HTTPResponseBuilder.failure(statusCode: 500, timeCost: 0, message: error.localizedDescription))
                 return
             }
 
@@ -286,9 +286,10 @@ private struct OCRResult {
 
 private struct OpenMacRequestRouter {
     func response(for request: HTTPRequestMessage) async -> Data {
+        let start = Date()
         openmacLog("--> \(request.method.rawValue) \(request.target)")
         do {
-            let data: Data
+            let data: APIResponseData
             switch request.path {
             case "/api/ocr":
                 data = try await handleOCR(request)
@@ -299,41 +300,49 @@ private struct OpenMacRequestRouter {
             default:
                 throw APIRequestError.notFound("Unknown path: \(request.path)")
             }
-            openmacLog("<-- \(request.method.rawValue) \(request.path) 200 (\(data.count) bytes)")
-            return data
+            let timeCost = Self.elapsedMilliseconds(since: start)
+            let response = HTTPResponseBuilder.success(timeCost: timeCost, data: data)
+            openmacLog("<-- \(request.method.rawValue) \(request.path) 200 (\(response.count) bytes, \(timeCost)ms)")
+            return response
         } catch let error as APIRequestError {
-            openmacLog("<-- \(request.method.rawValue) \(request.path) \(error.statusCode): \(error.message)")
-            return HTTPResponseBuilder.json(statusCode: error.statusCode, body: APIResponseBody(error: error.message))
+            let timeCost = Self.elapsedMilliseconds(since: start)
+            openmacLog("<-- \(request.method.rawValue) \(request.path) \(error.statusCode): \(error.message) (\(timeCost)ms)")
+            return HTTPResponseBuilder.failure(statusCode: error.statusCode, timeCost: timeCost, message: error.message)
         } catch {
-            openmacLog("<-- \(request.method.rawValue) \(request.path) 500: \(error.localizedDescription)")
-            return HTTPResponseBuilder.json(statusCode: 500, body: APIResponseBody(error: error.localizedDescription))
+            let timeCost = Self.elapsedMilliseconds(since: start)
+            openmacLog("<-- \(request.method.rawValue) \(request.path) 500: \(error.localizedDescription) (\(timeCost)ms)")
+            return HTTPResponseBuilder.failure(statusCode: 500, timeCost: timeCost, message: error.localizedDescription)
         }
     }
 
-    private func handleOCR(_ request: HTTPRequestMessage) async throws -> Data {
+    private static func elapsedMilliseconds(since start: Date) -> Int {
+        Int((Date().timeIntervalSince(start) * 1000).rounded())
+    }
+
+    private func handleOCR(_ request: HTTPRequestMessage) async throws -> APIResponseData {
         let payload = try APIRequestDecoder.decodeOCRRequest(from: request)
         let imageData = try await ImageDataLoader().load(from: try payload.source())
         let result = try OCRService().recognizeText(in: imageData)
-        return HTTPResponseBuilder.json(body: APIResponseBody(text: result.text, lines: result.lines))
+        return APIResponseData(text: result.text, lines: result.lines)
     }
 
-    private func handleTranslate(_ request: HTTPRequestMessage) async throws -> Data {
+    private func handleTranslate(_ request: HTTPRequestMessage) async throws -> APIResponseData {
         guard #available(macOS 15, *) else {
             throw APIRequestError.internalError("Translation requires macOS 15 or later")
         }
         let payload = try APIRequestDecoder.decodeTranslateRequest(from: request)
         let translated = try await TranslationService().translate(payload)
-        return HTTPResponseBuilder.json(body: APIResponseBody(text: translated))
+        return APIResponseData(text: translated)
     }
 
-    private func handleWebContent(_ request: HTTPRequestMessage) async throws -> Data {
+    private func handleWebContent(_ request: HTTPRequestMessage) async throws -> APIResponseData {
         let payload = try APIRequestDecoder.decodeWebContentRequest(from: request)
         guard let url = URL(string: payload.url) else {
             throw APIRequestError.badRequest("url must be a valid absolute URL")
         }
 
         let html = try await WebContentRenderer().renderHTML(from: url, options: try payload.resolvedOptions())
-        return HTTPResponseBuilder.json(body: APIResponseBody(html: html))
+        return APIResponseData(html: html)
     }
 }
 
