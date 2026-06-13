@@ -610,29 +610,20 @@ struct OpenMacView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            TextField("Port", text: $model.portText)
-                .textFieldStyle(.roundedBorder)
-            Toggle("Enabled", isOn: Binding(
-                get: { model.isEnabled },
-                set: { model.toggleServer($0) }
-            ))
-            Text(model.statusMessage)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-
-            Divider()
-
-            HStack(spacing: 6) {
-                Image(systemName: "bolt.horizontal.circle")
+            HStack(spacing: 8) {
                 Text("Supported APIs")
                     .font(.headline)
                 Spacer()
-                Circle()
-                    .fill(model.isEnabled ? Color.green : Color.secondary)
-                    .frame(width: 8, height: 8)
-                Text(model.isEnabled ? "Online" : "Offline")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                TextField("Port", text: $model.portText)
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.center)
+                    .frame(width: 64)
+                Toggle("", isOn: Binding(
+                    get: { model.isEnabled },
+                    set: { model.toggleServer($0) }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
             }
 
             ScrollView {
