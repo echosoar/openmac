@@ -448,48 +448,36 @@ private struct TranslationService {
             target: targetLanguage
         )
 
-        var result: String?
-        var translationError: Error?
-
-        // Translation.framework requires a SwiftUI view hierarchy to host the session.
-        // We drive it through a hidden off-screen view that fires the translation task
-        // and signals completion back via an actor-isolated continuation.
-        let actor = TranslationBridge()
-        try await actor.run(text: payload.text, configuration: config) { translated, error in
-            result = translated
-            translationError = error
-        }
-
-        if let translationError {
-            throw APIRequestError.internalError("Translation failed: \(translationError.localizedDescription)")
-        }
-        guard let translated = result else {
-            throw APIRequestError.internalError("Translation returned no result")
-        }
-        return translated
+        return try await TranslationBridge.shared.translate(text: payload.text, configuration: config)
     }
 }
 
 /// Bridges the SwiftUI-hosted Translation session to an async/await call site.
+///
+/// `Translation.framework` only exposes a `TranslationSession` through the
+/// `.translationTask` SwiftUI modifier, which must be attached to a live view.
+/// Since the HTTP handler runs outside any view hierarchy, we host a 1x1
+/// off-screen window, run the translation, and resume a continuation when the
+/// session reports its result.
 @available(macOS 15, *)
 @MainActor
 private final class TranslationBridge {
-    func run(
-        text: String,
-        configuration: TranslationSession.Configuration,
-        completion: @escaping (String?, Error?) -> Void
-    ) async throws {
-        // SwiftUI Translation.framework requires a view to attach the modifier.
-        // We create a minimal off-screen NSWindow that hosts the translation view.
-        let bridge = TranslationBridgeView(text: text, configuration: configuration, completion: completion)
-        let hosting = NSHostingController(rootView: bridge)
-        let window = NSWindow(contentViewController: hosting)
-        window.setFrame(NSRect(x: -9999, y: -9999, width: 1, height: 1), display: false)
-        window.orderFront(nil)
+    static let shared = TranslationBridge()
 
-        // Give SwiftUI one run-loop cycle to install the translation modifier.
-        try await Task.sleep(nanoseconds: 10_000_000) // 10 ms
-        window.close()
+    func translate(text: String, configuration: TranslationSession.Configuration) async throws -> String {
+        var window: NSWindow?
+        defer { window?.close() }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let view = TranslationBridgeView(text: text, configuration: configuration) { result in
+                continuation.resume(with: result)
+            }
+            let hosting = NSHostingController(rootView: view)
+            let hostWindow = NSWindow(contentViewController: hosting)
+            hostWindow.setFrame(NSRect(x: -9999, y: -9999, width: 1, height: 1), display: false)
+            hostWindow.orderFront(nil)
+            window = hostWindow
+        }
     }
 }
 
@@ -497,7 +485,7 @@ private final class TranslationBridge {
 private struct TranslationBridgeView: View {
     let text: String
     let configuration: TranslationSession.Configuration
-    let completion: (String?, Error?) -> Void
+    let completion: (Result<String, Error>) -> Void
 
     @State private var triggered = false
 
@@ -509,9 +497,9 @@ private struct TranslationBridgeView: View {
                 triggered = true
                 do {
                     let response = try await session.translate(text)
-                    completion(response.targetText, nil)
+                    completion(.success(response.targetText))
                 } catch {
-                    completion(nil, error)
+                    completion(.failure(APIRequestError.internalError("Translation failed: \(error.localizedDescription)")))
                 }
             }
     }
