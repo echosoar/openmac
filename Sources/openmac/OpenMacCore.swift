@@ -112,6 +112,34 @@ struct APIResponseBody: Encodable, Equatable {
     }
 }
 
+struct TranslateRequestPayload: Codable, Equatable {
+    var text: String
+    var from: String?
+    var to: String
+
+    func validated() throws -> TranslateRequestPayload {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else {
+            throw APIRequestError.badRequest("text must not be empty")
+        }
+        let trimmedTo = to.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTo.isEmpty else {
+            throw APIRequestError.badRequest("to language must not be empty")
+        }
+        return TranslateRequestPayload(
+            text: trimmedText,
+            from: from?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty,
+            to: trimmedTo
+        )
+    }
+}
+
+private extension String {
+    var nonEmpty: String? {
+        trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : self
+    }
+}
+
 enum APIRequestError: Error, Equatable, LocalizedError {
     case badRequest(String)
     case notFound(String)
@@ -225,6 +253,23 @@ enum APIRequestDecoder {
             let payload = try decodeJSON(OCRRequestPayload.self, from: request.body)
             _ = try payload.source()
             return payload
+        }
+    }
+
+    static func decodeTranslateRequest(from request: HTTPRequestMessage) throws -> TranslateRequestPayload {
+        switch request.method {
+        case .get:
+            guard let text = queryItem(named: "text", in: request.queryItems), !text.isEmpty else {
+                throw APIRequestError.badRequest("GET /api/translate requires ?text=")
+            }
+            guard let to = queryItem(named: "to", in: request.queryItems), !to.isEmpty else {
+                throw APIRequestError.badRequest("GET /api/translate requires ?to=")
+            }
+            let from = queryItem(named: "from", in: request.queryItems)
+            return try TranslateRequestPayload(text: text, from: from, to: to).validated()
+        case .post:
+            let payload = try decodeJSON(TranslateRequestPayload.self, from: request.body)
+            return try payload.validated()
         }
     }
 

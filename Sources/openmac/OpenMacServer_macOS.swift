@@ -4,6 +4,7 @@ import Foundation
 import ImageIO
 import Network
 import SwiftUI
+import Translation
 import Vision
 import WebKit
 
@@ -166,6 +167,8 @@ private struct OpenMacRequestRouter {
             switch request.path {
             case "/api/ocr":
                 return try await handleOCR(request)
+            case "/api/translate":
+                return try await handleTranslate(request)
             case "/api/web-content":
                 return try await handleWebContent(request)
             default:
@@ -183,6 +186,15 @@ private struct OpenMacRequestRouter {
         let imageData = try await ImageDataLoader().load(from: try payload.source())
         let result = try OCRService().recognizeText(in: imageData)
         return HTTPResponseBuilder.json(body: APIResponseBody(text: result.text, lines: result.lines))
+    }
+
+    private func handleTranslate(_ request: HTTPRequestMessage) async throws -> Data {
+        guard #available(macOS 15, *) else {
+            throw APIRequestError.internalError("Translation requires macOS 15 or later")
+        }
+        let payload = try APIRequestDecoder.decodeTranslateRequest(from: request)
+        let translated = try await TranslationService().translate(payload)
+        return HTTPResponseBuilder.json(body: APIResponseBody(text: translated))
     }
 
     private func handleWebContent(_ request: HTTPRequestMessage) async throws -> Data {
@@ -422,6 +434,86 @@ extension WKWebView {
                 }
             }
         }
+    }
+}
+
+@available(macOS 15, *)
+private struct TranslationService {
+    func translate(_ payload: TranslateRequestPayload) async throws -> String {
+        let sourceLanguage = payload.from.flatMap { Locale.Language(identifier: $0) }
+        let targetLanguage = Locale.Language(identifier: payload.to)
+
+        let config = TranslationSession.Configuration(
+            source: sourceLanguage,
+            target: targetLanguage
+        )
+
+        var result: String?
+        var translationError: Error?
+
+        // Translation.framework requires a SwiftUI view hierarchy to host the session.
+        // We drive it through a hidden off-screen view that fires the translation task
+        // and signals completion back via an actor-isolated continuation.
+        let actor = TranslationBridge()
+        try await actor.run(text: payload.text, configuration: config) { translated, error in
+            result = translated
+            translationError = error
+        }
+
+        if let translationError {
+            throw APIRequestError.internalError("Translation failed: \(translationError.localizedDescription)")
+        }
+        guard let translated = result else {
+            throw APIRequestError.internalError("Translation returned no result")
+        }
+        return translated
+    }
+}
+
+/// Bridges the SwiftUI-hosted Translation session to an async/await call site.
+@available(macOS 15, *)
+@MainActor
+private final class TranslationBridge {
+    func run(
+        text: String,
+        configuration: TranslationSession.Configuration,
+        completion: @escaping (String?, Error?) -> Void
+    ) async throws {
+        // SwiftUI Translation.framework requires a view to attach the modifier.
+        // We create a minimal off-screen NSWindow that hosts the translation view.
+        let bridge = TranslationBridgeView(text: text, configuration: configuration, completion: completion)
+        let hosting = NSHostingController(rootView: bridge)
+        let window = NSWindow(contentViewController: hosting)
+        window.setFrame(NSRect(x: -9999, y: -9999, width: 1, height: 1), display: false)
+        window.orderFront(nil)
+
+        // Give SwiftUI one run-loop cycle to install the translation modifier.
+        try await Task.sleep(nanoseconds: 10_000_000) // 10 ms
+        window.close()
+    }
+}
+
+@available(macOS 15, *)
+private struct TranslationBridgeView: View {
+    let text: String
+    let configuration: TranslationSession.Configuration
+    let completion: (String?, Error?) -> Void
+
+    @State private var triggered = false
+
+    var body: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .translationTask(configuration) { session in
+                guard !triggered else { return }
+                triggered = true
+                do {
+                    let response = try await session.translate(text)
+                    completion(response.targetText, nil)
+                } catch {
+                    completion(nil, error)
+                }
+            }
     }
 }
 
