@@ -140,6 +140,66 @@ private extension String {
     }
 }
 
+/// Metadata describing a public API endpoint, used by the settings UI to list
+/// supported features, show a sample request body, and build a copyable URL.
+struct APIEndpoint: Identifiable, Equatable {
+    let name: String
+    let method: String
+    let path: String
+    let summary: String
+    let requestDemo: String
+
+    var id: String { "\(method) \(path)" }
+
+    func address(host: String, port: String) -> String {
+        let trimmedPort = port.trimmingCharacters(in: .whitespacesAndNewlines)
+        let portComponent = trimmedPort.isEmpty ? "" : ":\(trimmedPort)"
+        return "http://\(host)\(portComponent)\(path)"
+    }
+
+    static let all: [APIEndpoint] = [
+        APIEndpoint(
+            name: "OCR / Text Recognition",
+            method: "POST",
+            path: "/api/ocr",
+            summary: "Recognize text in an image. Provide exactly one of url / base64 / file. GET supported via ?url=",
+            requestDemo: """
+            {
+              "url": "https://example.com/image.png"
+            }
+            """
+        ),
+        APIEndpoint(
+            name: "Translate",
+            method: "POST",
+            path: "/api/translate",
+            summary: "Translate text with the native macOS Translation framework (macOS 15+). \"from\" is optional. GET supported via ?text=&to=&from=",
+            requestDemo: """
+            {
+              "text": "Hello, world",
+              "from": "en",
+              "to": "zh"
+            }
+            """
+        ),
+        APIEndpoint(
+            name: "Web Content",
+            method: "POST",
+            path: "/api/web-content",
+            summary: "Load a page in a headless WebView and return its rendered HTML. GET supported via ?url=&waitUntil=&timeout=",
+            requestDemo: """
+            {
+              "url": "https://example.com",
+              "gotoOptions": {
+                "waitUntil": "networkidle0",
+                "timeout": 30000
+              }
+            }
+            """
+        )
+    ]
+}
+
 enum APIRequestError: Error, Equatable, LocalizedError {
     case badRequest(String)
     case notFound(String)

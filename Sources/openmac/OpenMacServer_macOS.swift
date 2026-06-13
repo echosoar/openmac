@@ -8,6 +8,11 @@ import Translation
 import Vision
 import WebKit
 
+/// Lightweight logger so server activity is visible in Console / Xcode output.
+func openmacLog(_ message: String) {
+    NSLog("[OpenMac] %@", message)
+}
+
 @MainActor
 final class OpenMacAppModel: ObservableObject {
     @Published var portText = "8080"
@@ -34,11 +39,13 @@ final class OpenMacAppModel: ObservableObject {
             self.server = server
             statusMessage = "Listening on :\(port)"
             isEnabled = true
+            openmacLog("Server enabled on port \(port)")
         } catch {
             statusMessage = error.localizedDescription
             server?.stop()
             server = nil
             isEnabled = false
+            openmacLog("Failed to start server: \(error.localizedDescription)")
         }
     }
 
@@ -60,30 +67,82 @@ final class OpenMacAppModel: ObservableObject {
 
 final class OpenMacHTTPServer {
     private let listener: NWListener
+    private let port: UInt16
     private let queue = DispatchQueue(label: "openmac.server")
+    private let connectionsQueue = DispatchQueue(label: "openmac.server.connections")
+    private var connections = [ObjectIdentifier: ConnectionHandler]()
 
     init(port: UInt16) throws {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw APIRequestError.badRequest("Invalid port")
         }
 
+        self.port = port
         listener = try NWListener(using: .tcp, on: nwPort)
     }
 
     func start() throws {
-        listener.newConnectionHandler = { connection in
-            ConnectionHandler(connection: connection).start()
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self else {
+                connection.cancel()
+                return
+            }
+
+            // Retain the handler for the lifetime of the connection. Without this
+            // strong reference the handler is deallocated as soon as this closure
+            // returns, its `[weak self]` receive callback sees a nil self, and no
+            // response is ever sent — which looks like "requests hang / no reply".
+            let handler = ConnectionHandler(connection: connection) { [weak self] finished in
+                self?.removeConnection(finished)
+            }
+            self.addConnection(handler)
+            openmacLog("New connection accepted (active: \(self.connectionCount()))")
+            handler.start()
         }
-        listener.stateUpdateHandler = { state in
-            if case let .failed(error) = state {
-                NSLog("OpenMac server failed: %@", error.localizedDescription)
+        listener.stateUpdateHandler = { [port] state in
+            switch state {
+            case .ready:
+                openmacLog("Server ready, listening on :\(port)")
+            case let .failed(error):
+                openmacLog("Server failed: \(error.localizedDescription)")
+            case .cancelled:
+                openmacLog("Server cancelled")
+            default:
+                break
             }
         }
+        openmacLog("Starting server on :\(port)")
         listener.start(queue: queue)
     }
 
     func stop() {
         listener.cancel()
+        // Snapshot and clear under the lock, then cancel outside it. Cancelling
+        // triggers each handler's completion -> removeConnection, which also locks
+        // connectionsQueue; doing it inside the lock would deadlock the serial queue.
+        let active = connectionsQueue.sync { () -> [ConnectionHandler] in
+            let values = Array(connections.values)
+            connections.removeAll()
+            return values
+        }
+        active.forEach { $0.cancel() }
+        openmacLog("Server stopped")
+    }
+
+    private func addConnection(_ handler: ConnectionHandler) {
+        connectionsQueue.sync {
+            connections[ObjectIdentifier(handler)] = handler
+        }
+    }
+
+    private func removeConnection(_ handler: ConnectionHandler) {
+        connectionsQueue.sync {
+            connections[ObjectIdentifier(handler)] = nil
+        }
+    }
+
+    private func connectionCount() -> Int {
+        connectionsQueue.sync { connections.count }
     }
 }
 
@@ -91,14 +150,28 @@ private final class ConnectionHandler {
     private let connection: NWConnection
     private let queue = DispatchQueue(label: "openmac.connection")
     private var buffer = Data()
+    private let onComplete: (ConnectionHandler) -> Void
+    private var didComplete = false
 
-    init(connection: NWConnection) {
+    init(connection: NWConnection, onComplete: @escaping (ConnectionHandler) -> Void) {
         self.connection = connection
+        self.onComplete = onComplete
     }
 
     func start() {
+        connection.stateUpdateHandler = { [weak self] state in
+            if case let .failed(error) = state {
+                openmacLog("Connection failed: \(error.localizedDescription)")
+                self?.complete()
+            }
+        }
         connection.start(queue: queue)
         receiveNextChunk()
+    }
+
+    func cancel() {
+        connection.cancel()
+        complete()
     }
 
     private func receiveNextChunk() {
@@ -118,20 +191,24 @@ private final class ConnectionHandler {
                     return
                 }
             } catch let requestError as APIRequestError {
+                openmacLog("Parse error \(requestError.statusCode): \(requestError.message)")
                 self.respond(with: HTTPResponseBuilder.json(statusCode: requestError.statusCode, body: APIResponseBody(error: requestError.message)))
                 return
             } catch {
+                openmacLog("Parse error 500: \(error.localizedDescription)")
                 self.respond(with: HTTPResponseBuilder.json(statusCode: 500, body: APIResponseBody(error: error.localizedDescription)))
                 return
             }
 
             if let error {
+                openmacLog("Receive error: \(error.localizedDescription)")
                 self.respond(with: HTTPResponseBuilder.json(statusCode: 500, body: APIResponseBody(error: error.localizedDescription)))
                 return
             }
 
             if isComplete {
-                self.connection.cancel()
+                openmacLog("Connection closed by peer before a full request was received")
+                self.cancel()
                 return
             }
 
@@ -147,9 +224,20 @@ private final class ConnectionHandler {
     }
 
     private func respond(with data: Data) {
-        connection.send(content: data, completion: .contentProcessed { [weak self] _ in
-            self?.connection.cancel()
+        connection.send(content: data, completion: .contentProcessed { [weak self] error in
+            if let error {
+                openmacLog("Send error: \(error.localizedDescription)")
+            }
+            self?.cancel()
         })
+    }
+
+    private func complete() {
+        guard !didComplete else {
+            return
+        }
+        didComplete = true
+        onComplete(self)
     }
 }
 
@@ -163,20 +251,26 @@ private struct OCRResult {
 
 private struct OpenMacRequestRouter {
     func response(for request: HTTPRequestMessage) async -> Data {
+        openmacLog("--> \(request.method.rawValue) \(request.target)")
         do {
+            let data: Data
             switch request.path {
             case "/api/ocr":
-                return try await handleOCR(request)
+                data = try await handleOCR(request)
             case "/api/translate":
-                return try await handleTranslate(request)
+                data = try await handleTranslate(request)
             case "/api/web-content":
-                return try await handleWebContent(request)
+                data = try await handleWebContent(request)
             default:
                 throw APIRequestError.notFound("Unknown path: \(request.path)")
             }
+            openmacLog("<-- \(request.method.rawValue) \(request.path) 200 (\(data.count) bytes)")
+            return data
         } catch let error as APIRequestError {
+            openmacLog("<-- \(request.method.rawValue) \(request.path) \(error.statusCode): \(error.message)")
             return HTTPResponseBuilder.json(statusCode: error.statusCode, body: APIResponseBody(error: error.message))
         } catch {
+            openmacLog("<-- \(request.method.rawValue) \(request.path) 500: \(error.localizedDescription)")
             return HTTPResponseBuilder.json(statusCode: 500, body: APIResponseBody(error: error.localizedDescription))
         }
     }
@@ -443,21 +537,6 @@ private final class WebContentRenderer: NSObject, WKNavigationDelegate {
     }
 }
 
-extension WKWebView {
-    @MainActor
-    fileprivate func evaluateJavaScript(_ javaScriptString: String) async throws -> Any {
-        try await withCheckedThrowingContinuation { continuation in
-            self.evaluateJavaScript(javaScriptString) { result, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(returning: result as Any)
-                }
-            }
-        }
-    }
-}
-
 @available(macOS 15, *)
 private struct TranslationService {
     func translate(_ payload: TranslateRequestPayload) async throws -> String {
@@ -540,9 +619,126 @@ struct OpenMacView: View {
             Text(model.statusMessage)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+
+            Divider()
+
+            HStack(spacing: 6) {
+                Image(systemName: "bolt.horizontal.circle")
+                Text("Supported APIs")
+                    .font(.headline)
+                Spacer()
+                Circle()
+                    .fill(model.isEnabled ? Color.green : Color.secondary)
+                    .frame(width: 8, height: 8)
+                Text(model.isEnabled ? "Online" : "Offline")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(APIEndpoint.all) { endpoint in
+                        APIEndpointRow(endpoint: endpoint, port: model.portText)
+                    }
+                }
+                .padding(.trailing, 2)
+            }
+            .frame(minHeight: 260)
         }
         .padding(16)
-        .frame(width: 320)
+        .frame(width: 440)
+        .frame(minHeight: 520)
+    }
+}
+
+private struct APIEndpointRow: View {
+    let endpoint: APIEndpoint
+    let port: String
+
+    @State private var isExpanded = false
+    @State private var didCopy = false
+
+    private var address: String {
+        endpoint.address(host: "localhost", port: port)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text(endpoint.method)
+                    .font(.caption2.weight(.bold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(methodColor.opacity(0.18))
+                    .foregroundStyle(methodColor)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                Text(endpoint.name)
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+            }
+
+            Text(endpoint.summary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                Text(address)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.secondary.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                Button(action: copyAddress) {
+                    Label(didCopy ? "Copied" : "Copy", systemImage: didCopy ? "checkmark" : "doc.on.doc")
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.bordered)
+                .help("Copy API address")
+            }
+
+            DisclosureGroup(isExpanded: $isExpanded) {
+                Text(endpoint.requestDemo)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(Color.secondary.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .padding(.top, 4)
+            } label: {
+                Text("Request body demo")
+                    .font(.caption.weight(.medium))
+            }
+        }
+        .padding(12)
+        .background(Color.secondary.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var methodColor: Color {
+        switch endpoint.method.uppercased() {
+        case "GET":
+            return .blue
+        case "POST":
+            return .green
+        default:
+            return .orange
+        }
+    }
+
+    private func copyAddress() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(address, forType: .string)
+        didCopy = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            didCopy = false
+        }
     }
 }
 #endif
