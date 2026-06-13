@@ -360,7 +360,7 @@ private final class WebContentRenderer: NSObject, WKNavigationDelegate {
             html: document.documentElement ? document.documentElement.outerHTML : ''
         }))();
         """
-        let result = try await webView.evaluateJavaScript(script)
+        let result = try await Self.runJavaScript(script, on: webView)
         guard let dictionary = result as? [String: Any] else {
             throw APIRequestError.internalError("Unable to inspect page state")
         }
@@ -373,8 +373,29 @@ private final class WebContentRenderer: NSObject, WKNavigationDelegate {
     }
 
     private func currentPageHTML(from webView: WKWebView) async throws -> String {
-        let result = try await webView.evaluateJavaScript("document.documentElement ? document.documentElement.outerHTML : ''")
+        let result = try await Self.runJavaScript("document.documentElement ? document.documentElement.outerHTML : ''", on: webView)
         return result as? String ?? ""
+    }
+
+    /// Evaluates JavaScript using the completion-handler API wrapped in a
+    /// continuation.
+    ///
+    /// Calling `webView.evaluateJavaScript(_:)` directly with `try await` is
+    /// ambiguous: the SDK exposes both an `async` overload and a
+    /// completion-handler overload (whose handler defaults to `nil`), and both
+    /// are valid candidates in an async context. Routing through the
+    /// completion-handler variant with an explicit trailing closure removes the
+    /// ambiguity.
+    private static func runJavaScript(_ script: String, on webView: WKWebView) async throws -> Any? {
+        try await withCheckedThrowingContinuation { continuation in
+            webView.evaluateJavaScript(script) { value, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: value)
+                }
+            }
+        }
     }
 
     private func finish(with result: Result<String, Error>) {
