@@ -34,11 +34,11 @@ final class OpenMacAppModel: ObservableObject {
         do {
             let port = try validatedPort()
             let server = try OpenMacHTTPServer(port: port)
-            server.stateHandler = { [weak self] result in
+            server.stateHandler = { [weak self] state in
                 // Listener state changes arrive on the listener queue; hop to the
                 // main actor before touching published UI state.
                 Task { @MainActor in
-                    self?.handleServerStateChange(result)
+                    self?.handleServerStateChange(state)
                 }
             }
             try server.start()
@@ -59,11 +59,11 @@ final class OpenMacAppModel: ObservableObject {
         isEnabled = false
     }
 
-    private func handleServerStateChange(_ result: Result<Void, String>) {
-        switch result {
-        case .success:
+    private func handleServerStateChange(_ state: ServerLifecycleState) {
+        switch state {
+        case .ready:
             isEnabled = true
-        case let .failure(message):
+        case let .failed(message):
             presentFailure(message)
         }
     }
@@ -87,11 +87,17 @@ final class OpenMacAppModel: ObservableObject {
     }
 }
 
+/// Asynchronous lifecycle of the HTTP listener, reported via `stateHandler`.
+enum ServerLifecycleState: Sendable {
+    case ready
+    case failed(String)
+}
+
 final class OpenMacHTTPServer {
-    /// Reports asynchronous listener state: `.success` when ready, `.failure`
+    /// Reports asynchronous listener state: `.ready` when listening, `.failed`
     /// with a message when the listener fails (e.g. port already in use).
     /// Invoked on the listener queue.
-    var stateHandler: ((Result<Void, String>) -> Void)?
+    var stateHandler: ((ServerLifecycleState) -> Void)?
 
     private let listener: NWListener
     private let port: UInt16
@@ -130,10 +136,10 @@ final class OpenMacHTTPServer {
             switch state {
             case .ready:
                 openmacLog("Server ready, listening on :\(port)")
-                self?.stateHandler?(.success(()))
+                self?.stateHandler?(.ready)
             case let .failed(error):
                 openmacLog("Server failed: \(error.localizedDescription)")
-                self?.stateHandler?(.failure(error.localizedDescription))
+                self?.stateHandler?(.failed(error.localizedDescription))
             case .cancelled:
                 openmacLog("Server cancelled")
             default:
