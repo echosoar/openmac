@@ -17,43 +17,65 @@ func openmacLog(_ message: String) {
 final class OpenMacAppModel: ObservableObject {
     @Published var portText = "8080"
     @Published var isEnabled = false
-    @Published var statusMessage = ""
+    @Published var isPresentingError = false
+    @Published private(set) var errorMessage = ""
 
     private var server: OpenMacHTTPServer?
 
     func toggleServer(_ enabled: Bool) {
         if enabled {
-            Task {
-                await startServer()
-            }
+            startServer()
         } else {
             stopServer()
         }
     }
 
-    func startServer() async {
+    func startServer() {
         do {
             let port = try validatedPort()
             let server = try OpenMacHTTPServer(port: port)
+            server.stateHandler = { [weak self] result in
+                // Listener state changes arrive on the listener queue; hop to the
+                // main actor before touching published UI state.
+                Task { @MainActor in
+                    self?.handleServerStateChange(result)
+                }
+            }
             try server.start()
             self.server = server
-            statusMessage = "Listening on :\(port)"
+            // Optimistically reflect the toggle; the listener reports .ready or
+            // .failed asynchronously (e.g. "Address already in use" arrives via
+            // stateHandler, not as a throw here).
             isEnabled = true
-            openmacLog("Server enabled on port \(port)")
+            openmacLog("Server enabling on port \(port)")
         } catch {
-            statusMessage = error.localizedDescription
-            server?.stop()
-            server = nil
-            isEnabled = false
-            openmacLog("Failed to start server: \(error.localizedDescription)")
+            presentFailure(error.localizedDescription)
         }
     }
 
     func stopServer() {
         server?.stop()
         server = nil
-        statusMessage = "Stopped"
         isEnabled = false
+    }
+
+    private func handleServerStateChange(_ result: Result<Void, String>) {
+        switch result {
+        case .success:
+            isEnabled = true
+        case let .failure(message):
+            presentFailure(message)
+        }
+    }
+
+    /// Tears down the server, flips the toggle back off, and surfaces an alert.
+    private func presentFailure(_ message: String) {
+        server?.stop()
+        server = nil
+        isEnabled = false
+        errorMessage = message
+        isPresentingError = true
+        openmacLog("Failed to start server: \(message)")
     }
 
     private func validatedPort() throws -> UInt16 {
@@ -66,6 +88,11 @@ final class OpenMacAppModel: ObservableObject {
 }
 
 final class OpenMacHTTPServer {
+    /// Reports asynchronous listener state: `.success` when ready, `.failure`
+    /// with a message when the listener fails (e.g. port already in use).
+    /// Invoked on the listener queue.
+    var stateHandler: ((Result<Void, String>) -> Void)?
+
     private let listener: NWListener
     private let port: UInt16
     private let queue = DispatchQueue(label: "openmac.server")
@@ -99,12 +126,14 @@ final class OpenMacHTTPServer {
             openmacLog("New connection accepted (active: \(self.connectionCount()))")
             handler.start()
         }
-        listener.stateUpdateHandler = { [port] state in
+        listener.stateUpdateHandler = { [port, weak self] state in
             switch state {
             case .ready:
                 openmacLog("Server ready, listening on :\(port)")
+                self?.stateHandler?(.success(()))
             case let .failed(error):
                 openmacLog("Server failed: \(error.localizedDescription)")
+                self?.stateHandler?(.failure(error.localizedDescription))
             case .cancelled:
                 openmacLog("Server cancelled")
             default:
@@ -639,6 +668,11 @@ struct OpenMacView: View {
         .padding(16)
         .frame(width: 440)
         .frame(minHeight: 520)
+        .alert("Server Error", isPresented: $model.isPresentingError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(model.errorMessage)
+        }
     }
 }
 
