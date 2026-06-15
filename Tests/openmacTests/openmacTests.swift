@@ -110,3 +110,184 @@ import Testing
         _ = try APIRequestDecoder.decodeWebContentRequest(from: request)
     }
 }
+
+
+@Test func decodesGetSearchRequestWithDefaults() throws {
+    let request = HTTPRequestMessage(
+        method: .get,
+        target: "/api/search?text=swift%20concurrency",
+        path: "/api/search",
+        queryItems: [URLQueryItem(name: "text", value: "swift concurrency")],
+        headers: [:],
+        body: Data()
+    )
+
+    let payload = try APIRequestDecoder.decodeSearchRequest(from: request)
+
+    #expect(payload.text == "swift concurrency")
+    #expect(payload.resolvedEngines == ["bing", "baidu", "brave"])
+    #expect(payload.resolvedCount == 3)
+    #expect(payload.resolvedExcludeDomains == [])
+}
+
+@Test func decodesGetSearchRequestWithCommaSeparatedLists() throws {
+    let request = HTTPRequestMessage(
+        method: .get,
+        target: "/api/search?text=x&engines=bing,brave&count=5&excludeDomains=baidu.com,zhihu.com",
+        path: "/api/search",
+        queryItems: [
+            URLQueryItem(name: "text", value: "x"),
+            URLQueryItem(name: "engines", value: "bing,brave"),
+            URLQueryItem(name: "count", value: "5"),
+            URLQueryItem(name: "excludeDomains", value: "baidu.com,zhihu.com")
+        ],
+        headers: [:],
+        body: Data()
+    )
+
+    let payload = try APIRequestDecoder.decodeSearchRequest(from: request)
+
+    #expect(payload.resolvedEngines == ["bing", "brave"])
+    #expect(payload.resolvedCount == 5)
+    #expect(payload.resolvedExcludeDomains == ["baidu.com", "zhihu.com"])
+}
+
+@Test func decodesPostSearchRequest() throws {
+    let request = HTTPRequestMessage(
+        method: .post,
+        target: "/api/search",
+        path: "/api/search",
+        queryItems: [],
+        headers: ["content-type": "application/json"],
+        body: Data("{\"text\":\"hello\",\"engines\":[\"bing\",\"brave\"],\"count\":2,\"excludeDomains\":[\"baidu.com\"]}".utf8)
+    )
+
+    let payload = try APIRequestDecoder.decodeSearchRequest(from: request)
+
+    #expect(payload.text == "hello")
+    #expect(payload.resolvedEngines == ["bing", "brave"])
+    #expect(payload.resolvedCount == 2)
+    #expect(payload.resolvedExcludeDomains == ["baidu.com"])
+}
+
+@Test func searchCountIsClampedToMaximum() throws {
+    let payload = try SearchRequestPayload(text: "x", engines: nil, count: 99, excludeDomains: nil).validated()
+    #expect(payload.resolvedCount == 6)
+}
+
+@Test func searchEnginesAreDeduplicatedPreservingOrder() throws {
+    let payload = try SearchRequestPayload(text: "x", engines: ["brave", "bing", "brave"], count: nil, excludeDomains: nil).validated()
+    #expect(payload.resolvedEngines == ["brave", "bing"])
+}
+
+@Test func rejectsEmptySearchText() throws {
+    let request = HTTPRequestMessage(
+        method: .post,
+        target: "/api/search",
+        path: "/api/search",
+        queryItems: [],
+        headers: ["content-type": "application/json"],
+        body: Data("{\"text\":\"   \"}".utf8)
+    )
+
+    #expect(throws: APIRequestError.self) {
+        _ = try APIRequestDecoder.decodeSearchRequest(from: request)
+    }
+}
+
+@Test func rejectsMissingSearchTextInGet() throws {
+    let request = HTTPRequestMessage(
+        method: .get,
+        target: "/api/search",
+        path: "/api/search",
+        queryItems: [],
+        headers: [:],
+        body: Data()
+    )
+
+    #expect(throws: APIRequestError.self) {
+        _ = try APIRequestDecoder.decodeSearchRequest(from: request)
+    }
+}
+
+@Test func rejectsUnsupportedSearchEngine() throws {
+    #expect(throws: APIRequestError.self) {
+        _ = try SearchRequestPayload(text: "x", engines: ["yahoo"], count: nil, excludeDomains: nil).validated()
+    }
+}
+
+@Test func rejectsNonPositiveSearchCount() throws {
+    let request = HTTPRequestMessage(
+        method: .get,
+        target: "/api/search?text=x&count=0",
+        path: "/api/search",
+        queryItems: [
+            URLQueryItem(name: "text", value: "x"),
+            URLQueryItem(name: "count", value: "0")
+        ],
+        headers: [:],
+        body: Data()
+    )
+
+    #expect(throws: APIRequestError.self) {
+        _ = try APIRequestDecoder.decodeSearchRequest(from: request)
+    }
+}
+
+@Test func searchResponseDataEncodesEnginesAndOmitsEmptyFields() throws {
+    let data = APIResponseData(engines: [
+        SearchEngineResult(
+            engine: "bing",
+            results: [SearchResultItem(title: "T", description: "D", url: "https://example.com")],
+            duration: 120
+        )
+    ])
+
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let json = try #require(String(data: try encoder.encode(data), encoding: .utf8))
+
+    #expect(json.contains("\"engines\""))
+    #expect(json.contains("\"engine\":\"bing\""))
+    #expect(json.contains("\"url\":\"https:\\/\\/example.com\""))
+    #expect(!json.contains("\"text\""))
+    #expect(!json.contains("\"html\""))
+}
+
+
+@Test func skillDocumentEmbedsConfiguredPort() {
+    let markdown = SkillDocument.markdown(port: "9090")
+
+    #expect(markdown.contains("http://127.0.0.1:9090"))
+    #expect(markdown.contains("Configured port: `9090`"))
+    #expect(markdown.contains("http://127.0.0.1:9090/SKILL.md"))
+}
+
+@Test func skillDocumentListsEveryEndpoint() {
+    let markdown = SkillDocument.markdown(port: "8080")
+
+    for endpoint in APIEndpoint.all {
+        #expect(markdown.contains(endpoint.name))
+        #expect(markdown.contains("http://127.0.0.1:8080\(endpoint.path)"))
+    }
+    #expect(markdown.contains("/api/search"))
+    #expect(markdown.contains("/api/ocr"))
+    #expect(markdown.contains("/api/translate"))
+    #expect(markdown.contains("/api/web-content"))
+}
+
+@Test func skillDocumentIncludesCompactCurlExample() {
+    let markdown = SkillDocument.markdown(port: "8080")
+
+    // The OCR demo body should be collapsed onto a single line for curl -d.
+    #expect(markdown.contains("curl -X POST 'http://127.0.0.1:8080/api/ocr'"))
+    #expect(markdown.contains("{\"url\":\"https://example.com/image.png\"}"))
+}
+
+@Test func skillDocumentHandlesCustomHostAndEmptyPort() {
+    let markdown = SkillDocument.markdown(host: "localhost", port: "")
+
+    #expect(markdown.contains("http://localhost/SKILL.md"))
+    #expect(markdown.contains("Configured port: `(default)`"))
+    #expect(!markdown.contains("localhost:/"))
+}
