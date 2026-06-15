@@ -125,7 +125,7 @@ final class OpenMacHTTPServer {
             // strong reference the handler is deallocated as soon as this closure
             // returns, its `[weak self]` receive callback sees a nil self, and no
             // response is ever sent — which looks like "requests hang / no reply".
-            let handler = ConnectionHandler(connection: connection) { [weak self] finished in
+            let handler = ConnectionHandler(connection: connection, port: self.port) { [weak self] finished in
                 self?.removeConnection(finished)
             }
             self.addConnection(handler)
@@ -183,13 +183,15 @@ final class OpenMacHTTPServer {
 
 private final class ConnectionHandler {
     private let connection: NWConnection
+    private let port: UInt16
     private let queue = DispatchQueue(label: "openmac.connection")
     private var buffer = Data()
     private let onComplete: (ConnectionHandler) -> Void
     private var didComplete = false
 
-    init(connection: NWConnection, onComplete: @escaping (ConnectionHandler) -> Void) {
+    init(connection: NWConnection, port: UInt16, onComplete: @escaping (ConnectionHandler) -> Void) {
         self.connection = connection
+        self.port = port
         self.onComplete = onComplete
     }
 
@@ -253,7 +255,7 @@ private final class ConnectionHandler {
 
     private func handle(_ request: HTTPRequestMessage) {
         Task {
-            let responseData = await OpenMacRequestRouter().response(for: request)
+            let responseData = await OpenMacRequestRouter(port: port).response(for: request)
             self.respond(with: responseData)
         }
     }
@@ -285,9 +287,18 @@ private struct OCRResult {
 }
 
 private struct OpenMacRequestRouter {
+    /// The port the server is listening on, used to fill in `/SKILL.md` URLs.
+    let port: UInt16
+
     func response(for request: HTTPRequestMessage) async -> Data {
         let start = Date()
         openmacLog("--> \(request.method.rawValue) \(request.target)")
+
+        // `/SKILL.md` returns a Markdown document instead of the JSON envelope.
+        if request.path == "/SKILL.md" || request.path == "/skill.md" {
+            return skillDocumentResponse(for: request, start: start)
+        }
+
         do {
             let data: APIResponseData
             switch request.path {
@@ -319,6 +330,21 @@ private struct OpenMacRequestRouter {
 
     private static func elapsedMilliseconds(since start: Date) -> Int {
         Int((Date().timeIntervalSince(start) * 1000).rounded())
+    }
+
+    private func skillDocumentResponse(for request: HTTPRequestMessage, start: Date) -> Data {
+        guard request.method == .get else {
+            let timeCost = Self.elapsedMilliseconds(since: start)
+            openmacLog("<-- \(request.method.rawValue) \(request.path) 405 (\(timeCost)ms)")
+            return HTTPResponseBuilder.failure(statusCode: 405, timeCost: timeCost, message: "\(request.path) only supports GET")
+        }
+
+        let markdown = SkillDocument.markdown(port: String(port))
+        let body = Data(markdown.utf8)
+        let response = HTTPResponseBuilder.build(statusCode: 200, contentType: SkillDocument.contentType, body: body)
+        let timeCost = Self.elapsedMilliseconds(since: start)
+        openmacLog("<-- GET \(request.path) 200 (\(response.count) bytes, \(timeCost)ms)")
+        return response
     }
 
     private func handleOCR(_ request: HTTPRequestMessage) async throws -> APIResponseData {

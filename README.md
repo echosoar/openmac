@@ -30,3 +30,6 @@ xcodebuild -project openmac.xcodeproj -scheme openmac -configuration Debug CODE_
   - `count` (optional) is the number of results per engine; defaults to `3`, capped at `6`
   - `excludeDomains` (optional) is a list of domains to filter out of the results; defaults to empty
   - For `GET`, `engines` and `excludeDomains` are comma-separated. Each engine is scraped in a headless WebView and runs concurrently; engines that fail or time out are omitted from the response
+- `GET /SKILL.md`
+  - Returns a Markdown "skill" document that describes every endpoint and how to call it (methods, URLs, example bodies, and `curl` examples)
+  - The server's configured port is filled into all example URLs automatically, so the document is ready to hand to an AI agent or paste into docs

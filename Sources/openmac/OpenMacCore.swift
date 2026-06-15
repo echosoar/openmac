@@ -546,6 +546,106 @@ enum APIRequestDecoder {
     }
 }
 
+/// Generates a Markdown "skill" document that explains every public endpoint
+/// and how to call it, with the user-configured port baked into all example
+/// URLs. Served at `GET /SKILL.md` so an AI agent (or human) can discover the
+/// full capability set of a running OpenMac instance.
+enum SkillDocument {
+    static let contentType = "text/markdown; charset=utf-8"
+
+    /// Builds the Markdown document for a server reachable at `host:port`.
+    static func markdown(host: String = "127.0.0.1", port: String) -> String {
+        let trimmedPort = port.trimmingCharacters(in: .whitespacesAndNewlines)
+        let portComponent = trimmedPort.isEmpty ? "" : ":\(trimmedPort)"
+        let baseURL = "http://\(host)\(portComponent)"
+
+        var lines: [String] = []
+        lines.append("# OpenMac Skill")
+        lines.append("")
+        lines.append("OpenMac runs a local HTTP server on this Mac that exposes native macOS capabilities — OCR, translation, headless web-page rendering, and multi-engine web search — over a simple JSON API.")
+        lines.append("")
+        lines.append("- Base URL: `\(baseURL)`")
+        lines.append("- Configured port: `\(trimmedPort.isEmpty ? "(default)" : trimmedPort)`")
+        lines.append("- Every endpoint accepts `POST` with a JSON body. Most also accept `GET` with query parameters.")
+        lines.append("- All JSON endpoints share the response envelope described below.")
+        lines.append("")
+        lines.append("## Response envelope")
+        lines.append("")
+        lines.append("```json")
+        lines.append("""
+        {
+          "success": true,
+          "timeCost": 123,
+          "data": {},
+          "message": ""
+        }
+        """)
+        lines.append("```")
+        lines.append("")
+        lines.append("- `success`: whether the request succeeded.")
+        lines.append("- `timeCost`: server processing time in milliseconds.")
+        lines.append("- `data`: endpoint-specific payload (described per endpoint below).")
+        lines.append("- `message`: human-readable error description when `success` is `false`.")
+        lines.append("")
+        lines.append("## Endpoints")
+        lines.append("")
+
+        for endpoint in APIEndpoint.all {
+            let url = endpoint.address(host: host, port: port)
+            let methods = endpoint.summary.contains("GET") ? "\(endpoint.method), GET" : endpoint.method
+
+            lines.append("### \(endpoint.name)")
+            lines.append("")
+            lines.append("- Methods: `\(methods)`")
+            lines.append("- URL: `\(url)`")
+            lines.append("- \(endpoint.summary)")
+            lines.append("")
+            lines.append("Example request body:")
+            lines.append("")
+            lines.append("```json")
+            lines.append(endpoint.requestDemo)
+            lines.append("```")
+            lines.append("")
+            lines.append("Example call:")
+            lines.append("")
+            lines.append("```bash")
+            lines.append("curl -X \(endpoint.method) '\(url)' \\")
+            lines.append("  -H 'Content-Type: application/json' \\")
+            lines.append("  -d '\(compactJSON(endpoint.requestDemo))'")
+            lines.append("```")
+            lines.append("")
+        }
+
+        lines.append("### Skill document")
+        lines.append("")
+        lines.append("- Methods: `GET`")
+        lines.append("- URL: `\(baseURL)/SKILL.md`")
+        lines.append("- Returns this Markdown document describing every available capability, with this instance's configured port already filled in.")
+        lines.append("")
+
+        return lines.joined(separator: "\n")
+    }
+
+    /// Collapses a pretty-printed JSON sample into a single line suitable for an
+    /// inline `curl -d` argument. Falls back to a whitespace-stripped version if
+    /// the sample is not valid JSON.
+    private static func compactJSON(_ json: String) -> String {
+        if let data = json.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data),
+           let compact = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+           let string = String(data: compact, encoding: .utf8) {
+            // JSONSerialization escapes forward slashes (`\/`); unescape them for
+            // more readable example URLs (both forms are valid JSON).
+            return string.replacingOccurrences(of: "\\/", with: "/")
+        }
+
+        return json
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .joined()
+    }
+}
+
 enum HTTPResponseBuilder {
     /// Build a success response: `success=true`, the given `data`, empty message.
     static func success(statusCode: Int = 200, timeCost: Int, data: APIResponseData) -> Data {

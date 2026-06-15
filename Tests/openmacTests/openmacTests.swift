@@ -253,3 +253,41 @@ import Testing
     #expect(!json.contains("\"text\""))
     #expect(!json.contains("\"html\""))
 }
+
+
+@Test func skillDocumentEmbedsConfiguredPort() {
+    let markdown = SkillDocument.markdown(port: "9090")
+
+    #expect(markdown.contains("http://127.0.0.1:9090"))
+    #expect(markdown.contains("Configured port: `9090`"))
+    #expect(markdown.contains("http://127.0.0.1:9090/SKILL.md"))
+}
+
+@Test func skillDocumentListsEveryEndpoint() {
+    let markdown = SkillDocument.markdown(port: "8080")
+
+    for endpoint in APIEndpoint.all {
+        #expect(markdown.contains(endpoint.name))
+        #expect(markdown.contains("http://127.0.0.1:8080\(endpoint.path)"))
+    }
+    #expect(markdown.contains("/api/search"))
+    #expect(markdown.contains("/api/ocr"))
+    #expect(markdown.contains("/api/translate"))
+    #expect(markdown.contains("/api/web-content"))
+}
+
+@Test func skillDocumentIncludesCompactCurlExample() {
+    let markdown = SkillDocument.markdown(port: "8080")
+
+    // The OCR demo body should be collapsed onto a single line for curl -d.
+    #expect(markdown.contains("curl -X POST 'http://127.0.0.1:8080/api/ocr'"))
+    #expect(markdown.contains("{\"url\":\"https://example.com/image.png\"}"))
+}
+
+@Test func skillDocumentHandlesCustomHostAndEmptyPort() {
+    let markdown = SkillDocument.markdown(host: "localhost", port: "")
+
+    #expect(markdown.contains("http://localhost/SKILL.md"))
+    #expect(markdown.contains("Configured port: `(default)`"))
+    #expect(!markdown.contains("localhost:/"))
+}
