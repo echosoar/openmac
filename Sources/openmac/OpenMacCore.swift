@@ -89,6 +89,68 @@ struct WebContentRequestPayload: Codable, Equatable {
     }
 }
 
+struct SearchRequestPayload: Codable, Equatable {
+    var text: String
+    var engines: [String]?
+    var count: Int?
+    var excludeDomains: [String]?
+
+    /// Engines queried when the caller does not specify `engines`.
+    static let defaultEngines = ["bing", "baidu", "brave"]
+    /// Search engines that can be scraped via the headless WebView.
+    static let supportedEngines = [
+        "baidu", "bing", "brave", "duckduckgo", "google", "sogou", "wikipedia", "arxiv"
+    ]
+    static let defaultCount = 3
+    /// Upper bound on results requested per engine, mirroring RACT's behaviour.
+    static let maxCount = 6
+
+    var resolvedEngines: [String] {
+        let normalized = (engines ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+        let candidates = normalized.isEmpty ? Self.defaultEngines : normalized
+        // Preserve order while removing duplicates.
+        var seen = Set<String>()
+        return candidates.filter { seen.insert($0).inserted }
+    }
+
+    var resolvedCount: Int {
+        let requested = count ?? Self.defaultCount
+        return max(1, min(requested, Self.maxCount))
+    }
+
+    var resolvedExcludeDomains: [String] {
+        (excludeDomains ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    func validated() throws -> SearchRequestPayload {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else {
+            throw APIRequestError.badRequest("text must not be empty")
+        }
+
+        if let count, count <= 0 {
+            throw APIRequestError.badRequest("count must be a positive integer")
+        }
+
+        let resolved = resolvedEngines
+        let unsupported = resolved.filter { !Self.supportedEngines.contains($0) }
+        guard unsupported.isEmpty else {
+            throw APIRequestError.badRequest("Unsupported engines: \(unsupported.joined(separator: ", ")). Supported: \(Self.supportedEngines.joined(separator: ", "))")
+        }
+
+        return SearchRequestPayload(
+            text: trimmedText,
+            engines: resolved,
+            count: resolvedCount,
+            excludeDomains: resolvedExcludeDomains
+        )
+    }
+}
+
 struct HTTPRequestMessage: Equatable {
     var method: HTTPMethod
     var target: String
@@ -98,6 +160,21 @@ struct HTTPRequestMessage: Equatable {
     var body: Data
 }
 
+/// A single search hit extracted from a search engine results page.
+struct SearchResultItem: Encodable, Equatable {
+    let title: String
+    let description: String
+    let url: String
+}
+
+/// The results returned by one search engine, plus how long that engine took.
+struct SearchEngineResult: Encodable, Equatable {
+    let engine: String
+    let results: [SearchResultItem]
+    /// Time spent on this engine, in milliseconds.
+    let duration: Int
+}
+
 /// The payload-specific portion of a response (the `data` object). Unused
 /// fields are omitted from the encoded JSON (synthesized Encodable skips nil
 /// optionals), so an empty instance encodes to `{}`.
@@ -105,11 +182,13 @@ struct APIResponseData: Encodable, Equatable {
     let text: String?
     let lines: [String]?
     let html: String?
+    let engines: [SearchEngineResult]?
 
-    init(text: String? = nil, lines: [String]? = nil, html: String? = nil) {
+    init(text: String? = nil, lines: [String]? = nil, html: String? = nil, engines: [SearchEngineResult]? = nil) {
         self.text = text
         self.lines = lines
         self.html = html
+        self.engines = engines
     }
 }
 
@@ -204,6 +283,20 @@ struct APIEndpoint: Identifiable, Equatable {
                 "waitUntil": "networkidle0",
                 "timeout": 30000
               }
+            }
+            """
+        ),
+        APIEndpoint(
+            name: "Web Search",
+            method: "POST",
+            path: "/api/search",
+            summary: "Search the web through headless WebViews across multiple engines. Only \"text\" is required. GET supported via ?text=&engines=bing,brave&count=3&excludeDomains=baidu.com",
+            requestDemo: """
+            {
+              "text": "swift concurrency",
+              "engines": ["bing", "brave"],
+              "count": 3,
+              "excludeDomains": ["baidu.com"]
             }
             """
         )
@@ -343,6 +436,29 @@ enum APIRequestDecoder {
         }
     }
 
+    static func decodeSearchRequest(from request: HTTPRequestMessage) throws -> SearchRequestPayload {
+        switch request.method {
+        case .get:
+            guard let text = queryItem(named: "text", in: request.queryItems), !text.isEmpty else {
+                throw APIRequestError.badRequest("GET /api/search requires ?text=")
+            }
+
+            let engines = parseList(queryItem(named: "engines", in: request.queryItems))
+            let excludeDomains = parseList(queryItem(named: "excludeDomains", in: request.queryItems))
+            let count = try parseCount(queryItem(named: "count", in: request.queryItems))
+
+            return try SearchRequestPayload(
+                text: text,
+                engines: engines,
+                count: count,
+                excludeDomains: excludeDomains
+            ).validated()
+        case .post:
+            let payload = try decodeJSON(SearchRequestPayload.self, from: request.body)
+            return try payload.validated()
+        }
+    }
+
     static func decodeWebContentRequest(from request: HTTPRequestMessage) throws -> WebContentRequestPayload {
         switch request.method {
         case .get:
@@ -398,6 +514,31 @@ enum APIRequestDecoder {
         }
 
         return timeout
+    }
+
+    /// Parses a comma-separated query value (e.g. `engines=bing,brave`) into a
+    /// trimmed, non-empty list, or `nil` when the parameter is absent/blank.
+    private static func parseList(_ value: String?) -> [String]? {
+        guard let value, !value.isEmpty else {
+            return nil
+        }
+
+        let items = value.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return items.isEmpty ? nil : items
+    }
+
+    private static func parseCount(_ value: String?) throws -> Int? {
+        guard let value, !value.isEmpty else {
+            return nil
+        }
+
+        guard let count = Int(value), count > 0 else {
+            throw APIRequestError.badRequest("count must be a positive integer")
+        }
+
+        return count
     }
 
     private static func queryItem(named name: String, in queryItems: [URLQueryItem]) -> String? {

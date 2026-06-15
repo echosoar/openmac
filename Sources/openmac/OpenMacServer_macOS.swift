@@ -297,6 +297,8 @@ private struct OpenMacRequestRouter {
                 data = try await handleTranslate(request)
             case "/api/web-content":
                 data = try await handleWebContent(request)
+            case "/api/search":
+                data = try await handleSearch(request)
             default:
                 throw APIRequestError.notFound("Unknown path: \(request.path)")
             }
@@ -343,6 +345,17 @@ private struct OpenMacRequestRouter {
 
         let html = try await WebContentRenderer().renderHTML(from: url, options: try payload.resolvedOptions())
         return APIResponseData(html: html)
+    }
+
+    private func handleSearch(_ request: HTTPRequestMessage) async throws -> APIResponseData {
+        let payload = try APIRequestDecoder.decodeSearchRequest(from: request)
+        let engines = try await WebSearchService().search(
+            query: payload.text,
+            engines: payload.resolvedEngines,
+            count: payload.resolvedCount,
+            excludeDomains: payload.resolvedExcludeDomains
+        )
+        return APIResponseData(engines: engines)
     }
 }
 
@@ -576,6 +589,393 @@ private final class WebContentRenderer: NSObject, WKNavigationDelegate {
                     return originalSend.apply(this, args);
                 };
             }
+        })();
+        """
+    }
+}
+
+/// Headless multi-engine web search. For each engine we load its public results
+/// page in an off-screen `WKWebView`, wait for the page to settle, then extract
+/// hits with an engine-specific JavaScript scraper. Engines run concurrently; an
+/// engine that fails or times out is simply omitted from the response.
+@MainActor
+private final class WebSearchService {
+    private let perEngineTimeout: TimeInterval = 12.0
+    private let extractionDelay: TimeInterval = 1.5
+
+    func search(query: String, engines: [String], count: Int, excludeDomains: [String]) async throws -> [SearchEngineResult] {
+        guard !engines.isEmpty else {
+            throw APIRequestError.badRequest("No search engines specified")
+        }
+
+        let timeout = perEngineTimeout
+        let delay = extractionDelay
+
+        // Run engines concurrently; remember each engine's index so the response
+        // preserves the order the caller requested rather than completion order.
+        let collected = await withTaskGroup(of: (Int, SearchEngineResult?).self) { group in
+            for (index, engine) in engines.enumerated() {
+                group.addTask { @MainActor in
+                    let start = Date()
+                    let runner = SearchEngineRunner(
+                        engineId: engine,
+                        query: query,
+                        count: count,
+                        excludeDomains: excludeDomains,
+                        timeout: timeout,
+                        extractionDelay: delay
+                    )
+                    do {
+                        let items = try await runner.run()
+                        let duration = Int((Date().timeIntervalSince(start) * 1000).rounded())
+                        return (index, SearchEngineResult(engine: engine, results: items, duration: duration))
+                    } catch {
+                        openmacLog("Search engine \(engine) failed: \(error.localizedDescription)")
+                        return (index, nil)
+                    }
+                }
+            }
+
+            var results = [(Int, SearchEngineResult)]()
+            for await (index, result) in group {
+                if let result {
+                    results.append((index, result))
+                }
+            }
+            return results
+        }
+
+        guard !collected.isEmpty else {
+            throw APIRequestError.internalError("All search engines failed to return results")
+        }
+
+        return collected.sorted { $0.0 < $1.0 }.map { $0.1 }
+    }
+}
+
+/// Performs a single-engine search in an off-screen WebView and resolves to the
+/// extracted hits (or throws on navigation failure / timeout).
+@MainActor
+private final class SearchEngineRunner: NSObject, WKNavigationDelegate {
+    private let engineId: String
+    private let query: String
+    private let count: Int
+    private let excludeDomains: [String]
+    private let timeout: TimeInterval
+    private let extractionDelay: TimeInterval
+
+    private var webView: WKWebView?
+    private var continuation: CheckedContinuation<[SearchResultItem], Error>?
+    private var timeoutTask: Task<Void, Never>?
+    private var settled = false
+
+    init(engineId: String, query: String, count: Int, excludeDomains: [String], timeout: TimeInterval, extractionDelay: TimeInterval) {
+        self.engineId = engineId
+        self.query = query
+        self.count = count
+        self.excludeDomains = excludeDomains
+        self.timeout = timeout
+        self.extractionDelay = extractionDelay
+        super.init()
+    }
+
+    func run() async throws -> [SearchResultItem] {
+        guard let url = Self.buildSearchURL(query: query, engineId: engineId) else {
+            throw APIRequestError.badRequest("Unsupported search engine: \(engineId)")
+        }
+
+        let configuration = WKWebViewConfiguration()
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        // Present as a recent desktop Safari so engines serve their standard markup.
+        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15"
+        webView.navigationDelegate = self
+        self.webView = webView
+
+        return try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+            self.timeoutTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                try? await Task.sleep(nanoseconds: UInt64(self.timeout * 1_000_000_000))
+                guard !self.settled else { return }
+                self.finish(with: .failure(APIRequestError.internalError("Search timed out for engine \(self.engineId)")))
+            }
+            webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: self.timeout))
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // Give client-side rendering a moment before scraping the DOM.
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: UInt64(self.extractionDelay * 1_000_000_000))
+            guard !self.settled else { return }
+            await self.extractResults(from: webView)
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        finish(with: .failure(error))
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        finish(with: .failure(error))
+    }
+
+    private func extractResults(from webView: WKWebView) async {
+        guard !settled else { return }
+
+        let script = Self.extractionScript(engineId: engineId, count: count, excludeDomains: excludeDomains)
+        do {
+            let value = try await Self.runJavaScript(script, on: webView)
+            // A `null` return means the scraper found no matching elements.
+            guard let array = value as? [[String: Any]] else {
+                finish(with: .success([]))
+                return
+            }
+            let items = array.compactMap { dict -> SearchResultItem? in
+                guard let title = dict["title"] as? String,
+                      let url = dict["url"] as? String,
+                      !url.isEmpty else {
+                    return nil
+                }
+                let description = dict["description"] as? String ?? ""
+                return SearchResultItem(title: title, description: description, url: url)
+            }
+            finish(with: .success(items))
+        } catch {
+            finish(with: .failure(error))
+        }
+    }
+
+    private func finish(with result: Result<[SearchResultItem], Error>) {
+        guard !settled, let continuation else {
+            return
+        }
+        settled = true
+        self.continuation = nil
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        webView?.navigationDelegate = nil
+        webView?.stopLoading()
+        webView = nil
+        continuation.resume(with: result)
+    }
+
+    /// Evaluates JavaScript via the completion-handler API wrapped in a
+    /// continuation (mirrors `WebContentRenderer.runJavaScript`, which avoids the
+    /// async/completion-handler overload ambiguity).
+    private static func runJavaScript(_ script: String, on webView: WKWebView) async throws -> Any? {
+        try await withCheckedThrowingContinuation { continuation in
+            webView.evaluateJavaScript(script) { value, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: value)
+                }
+            }
+        }
+    }
+
+    private static func buildSearchURL(query: String, engineId: String) -> URL? {
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        let urlString: String
+        switch engineId {
+        case "baidu":
+            urlString = "https://www.baidu.com/s?wd=\(encoded)"
+        case "bing":
+            urlString = "https://www.bing.com/search?q=\(encoded)&from=HDRSC1"
+        case "brave":
+            urlString = "https://search.brave.com/search?q=\(encoded)&source=web"
+        case "duckduckgo":
+            urlString = "https://duckduckgo.com/?q=\(encoded)"
+        case "google":
+            urlString = "https://www.google.com/search?q=\(encoded)"
+        case "sogou":
+            urlString = "https://www.sogou.com/web?query=\(encoded)"
+        case "wikipedia":
+            urlString = "https://zh.wikipedia.org/w/index.php?search=\(encoded)&profile=advanced&fulltext=1&ns0=1"
+        case "arxiv":
+            urlString = "https://arxiv.org/search/?query=\(encoded)&searchtype=all&source=header"
+        default:
+            return nil
+        }
+        return URL(string: urlString)
+    }
+
+    /// Builds the engine-specific DOM scraper. The scraper returns an array of
+    /// `{title, description, url}` objects, or `null` when no results are found.
+    private static func extractionScript(engineId: String, count: Int, excludeDomains: [String]) -> String {
+        let maxResults = max(1, min(count, 6))
+        let excludedJSON = (try? JSONEncoder().encode(excludeDomains)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+
+        switch engineId {
+        case "baidu":
+            return scraper(selector: ".result", titleSelector: "h3 a", descSelector: ".cos-row", maxResults: maxResults, excludedJSON: excludedJSON, urlFrom: "elem.getAttribute('mu') || titleElem.href || ''")
+        case "bing":
+            return scraper(selector: ".b_algo", titleSelector: "h2 a", descSelector: ".b_caption p", maxResults: maxResults, excludedJSON: excludedJSON, urlFrom: "titleElem.href || ''")
+        case "brave":
+            return """
+            (function() {
+                var results = [];
+                var elements = document.querySelectorAll('.result-wrapper, .snippet[data-type="web"]');
+                if (elements.length === 0) { return null; }
+                var excludedHosts = \(excludedJSON);
+                var maxResults = \(maxResults);
+                for (var i = 0; i < elements.length; i++) {
+                    var elem = elements[i];
+                    var titleElem = elem.querySelector('.search-snippet-title, .title');
+                    var linkElem = elem.querySelector('.result-content > a, a.heading-serpresult, a');
+                    var descElem = elem.querySelector('.content, .snippet-description');
+                    if (titleElem) {
+                        var url = linkElem ? linkElem.href : '';
+                        var include = true;
+                        for (var j = 0; j < excludedHosts.length; j++) {
+                            if (url.indexOf(excludedHosts[j]) !== -1) { include = false; break; }
+                        }
+                        if (include) {
+                            results.push({ title: titleElem.textContent.trim(), description: descElem ? descElem.textContent.trim() : '', url: url });
+                            if (results.length >= maxResults) { break; }
+                        }
+                    }
+                }
+                return results;
+            })();
+            """
+        case "duckduckgo":
+            return scraper(selector: "article[data-testid=\"result\"]", titleSelector: "h2 a", descSelector: "[data-result=\"snippet\"]", maxResults: maxResults, excludedJSON: excludedJSON, urlFrom: "titleElem.href || ''")
+        case "google":
+            return """
+            (function() {
+                var results = [];
+                var elements = document.querySelectorAll('[data-hveid]');
+                if (elements.length === 0) { return null; }
+                var excludedHosts = \(excludedJSON);
+                var maxResults = \(maxResults);
+                for (var i = 0; i < elements.length; i++) {
+                    var elem = elements[i];
+                    var titleElem = elem.querySelector('h3');
+                    var linkElem = elem.querySelector('a');
+                    var descElem = elem.querySelector('[data-sncf]');
+                    if (titleElem && linkElem) {
+                        var url = linkElem.href || '';
+                        var include = true;
+                        for (var j = 0; j < excludedHosts.length; j++) {
+                            if (url.indexOf(excludedHosts[j]) !== -1) { include = false; break; }
+                        }
+                        if (include) {
+                            results.push({ title: titleElem.textContent.trim(), description: descElem ? descElem.textContent.trim() : '', url: url });
+                            if (results.length >= maxResults) { break; }
+                        }
+                    }
+                }
+                return results;
+            })();
+            """
+        case "sogou":
+            return """
+            (function() {
+                var results = [];
+                var elements = document.querySelectorAll('.vrwrap, .rb');
+                if (elements.length === 0) { return null; }
+                var excludedHosts = \(excludedJSON);
+                var maxResults = \(maxResults);
+                for (var i = 0; i < elements.length; i++) {
+                    var elem = elements[i];
+                    var titleElem = elem.querySelector('h3 a, .pt a');
+                    var descElem = elem.querySelector('.str-text, .str_text');
+                    if (titleElem) {
+                        var originUrlEle = elem.querySelector('[data-docid][data-url]');
+                        var url = originUrlEle ? originUrlEle.getAttribute('data-url') : (titleElem.href || '');
+                        var include = true;
+                        for (var j = 0; j < excludedHosts.length; j++) {
+                            if (url.indexOf(excludedHosts[j]) !== -1) { include = false; break; }
+                        }
+                        if (include) {
+                            results.push({ title: titleElem.textContent.trim(), description: descElem ? descElem.textContent.trim() : '', url: url });
+                            if (results.length >= maxResults) { break; }
+                        }
+                    }
+                }
+                return results;
+            })();
+            """
+        case "wikipedia":
+            return """
+            (function() {
+                var results = [];
+                var elements = document.querySelectorAll('.mw-search-result');
+                if (elements.length === 0) { return null; }
+                var maxResults = \(maxResults);
+                for (var i = 0; i < elements.length; i++) {
+                    var elem = elements[i];
+                    var titleElem = elem.querySelector('.mw-search-result-heading a');
+                    var descElem = elem.querySelector('.searchresult');
+                    if (titleElem) {
+                        var url = titleElem.getAttribute('href') ? 'https://zh.wikipedia.org' + titleElem.getAttribute('href') : '';
+                        results.push({ title: titleElem.textContent.trim(), description: descElem ? descElem.textContent.trim() : '', url: url });
+                        if (results.length >= maxResults) { break; }
+                    }
+                }
+                return results;
+            })();
+            """
+        case "arxiv":
+            return """
+            (function() {
+                var results = [];
+                var elements = document.querySelectorAll('.arxiv-result');
+                if (elements.length === 0) { return null; }
+                var maxResults = \(maxResults);
+                for (var i = 0; i < elements.length; i++) {
+                    var elem = elements[i];
+                    var titleElem = elem.querySelector('.title');
+                    var linkElem = elem.querySelector('.list-title > a');
+                    var authorsElem = elem.querySelector('.authors');
+                    var abstractElem = elem.querySelector('.abstract-full');
+                    if (titleElem && linkElem) {
+                        var url = linkElem.href || '';
+                        var description = [];
+                        if (authorsElem) { description.push(authorsElem.textContent.trim()); }
+                        if (abstractElem) { description.push(abstractElem.textContent.trim()); }
+                        results.push({ title: titleElem.textContent.trim(), description: description.join(' '), url: url });
+                        if (results.length >= maxResults) { break; }
+                    }
+                }
+                return results;
+            })();
+            """
+        default:
+            return "null;"
+        }
+    }
+
+    /// Shared scraper template for engines whose results follow a simple
+    /// "container -> title link + description" shape.
+    private static func scraper(selector: String, titleSelector: String, descSelector: String, maxResults: Int, excludedJSON: String, urlFrom: String) -> String {
+        return """
+        (function() {
+            var results = [];
+            var elements = document.querySelectorAll('\(selector)');
+            if (elements.length === 0) { return null; }
+            var excludedHosts = \(excludedJSON);
+            var maxResults = \(maxResults);
+            for (var i = 0; i < elements.length; i++) {
+                var elem = elements[i];
+                var titleElem = elem.querySelector('\(titleSelector)');
+                var descElem = elem.querySelector('\(descSelector)');
+                if (titleElem) {
+                    var url = \(urlFrom);
+                    var include = true;
+                    for (var j = 0; j < excludedHosts.length; j++) {
+                        if (url.indexOf(excludedHosts[j]) !== -1) { include = false; break; }
+                    }
+                    if (include) {
+                        results.push({ title: titleElem.textContent.trim(), description: descElem ? descElem.textContent.trim() : '', url: url });
+                        if (results.length >= maxResults) { break; }
+                    }
+                }
+            }
+            return results;
         })();
         """
     }
