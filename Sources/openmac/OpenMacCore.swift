@@ -46,16 +46,19 @@ struct GotoOptions: Codable, Equatable {
     }
 }
 
-struct OCRRequestPayload: Codable, Equatable {
+/// Image input shared by every endpoint that consumes an image
+/// (OCR, face detection, barcode/QR detection). Callers provide exactly one of
+/// `url`, `base64`, or `file`.
+struct ImageRequestPayload: Codable, Equatable {
     var url: String?
     var base64: String?
     var file: String?
 
-    func source() throws -> OCRSource {
-        let candidates: [OCRSource] = [
-            normalized(url).map(OCRSource.url),
-            normalized(base64).map(OCRSource.base64),
-            normalized(file).map(OCRSource.file)
+    func source() throws -> ImageSource {
+        let candidates: [ImageSource] = [
+            normalized(url).map(ImageSource.url),
+            normalized(base64).map(ImageSource.base64),
+            normalized(file).map(ImageSource.file)
         ].compactMap { $0 }
 
         guard candidates.count == 1, let source = candidates.first else {
@@ -74,10 +77,37 @@ struct OCRRequestPayload: Codable, Equatable {
     }
 }
 
-enum OCRSource: Equatable {
+enum ImageSource: Equatable {
     case url(String)
     case base64(String)
     case file(String)
+}
+
+/// Text-to-speech request. `text` is required; the rest tune voice selection
+/// and delivery and fall back to system defaults when omitted.
+struct TTSRequestPayload: Codable, Equatable {
+    var text: String
+    var voice: String?
+    var language: String?
+    var rate: Float?
+    var pitch: Float?
+    var volume: Float?
+
+    func validated() throws -> TTSRequestPayload {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else {
+            throw APIRequestError.badRequest("text must not be empty")
+        }
+
+        return TTSRequestPayload(
+            text: trimmedText,
+            voice: voice?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty,
+            language: language?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty,
+            rate: rate,
+            pitch: pitch,
+            volume: volume
+        )
+    }
 }
 
 struct WebContentRequestPayload: Codable, Equatable {
@@ -98,6 +128,41 @@ struct HTTPRequestMessage: Equatable {
     var body: Data
 }
 
+/// A normalized rectangle (origin bottom-left, values in 0...1) describing where
+/// something was detected within the image, matching Vision's coordinate space.
+struct BoundingBox: Encodable, Equatable {
+    let x: Double
+    let y: Double
+    let width: Double
+    let height: Double
+}
+
+/// A normalized 2D point in 0...1, used for facial landmark coordinates.
+struct NormalizedPoint: Encodable, Equatable {
+    let x: Double
+    let y: Double
+}
+
+/// A single detected face: where it is, its facial landmark groups (eyes, nose,
+/// lips, ...), optional pose angles, and a feature-print vector that can be used
+/// to compare/identify faces.
+struct FaceObservation: Encodable, Equatable {
+    let boundingBox: BoundingBox
+    let roll: Double?
+    let yaw: Double?
+    let pitch: Double?
+    let landmarks: [String: [NormalizedPoint]]
+    let featureVector: [Float]?
+}
+
+/// A single detected barcode or QR code: its decoded payload and symbology
+/// (e.g. "VNBarcodeSymbologyQR", "VNBarcodeSymbologyEAN13").
+struct BarcodeObservation: Encodable, Equatable {
+    let payload: String?
+    let symbology: String
+    let boundingBox: BoundingBox
+}
+
 /// The payload-specific portion of a response (the `data` object). Unused
 /// fields are omitted from the encoded JSON (synthesized Encodable skips nil
 /// optionals), so an empty instance encodes to `{}`.
@@ -105,11 +170,24 @@ struct APIResponseData: Encodable, Equatable {
     let text: String?
     let lines: [String]?
     let html: String?
+    let faces: [FaceObservation]?
+    let barcodes: [BarcodeObservation]?
+    let audio: String?
 
-    init(text: String? = nil, lines: [String]? = nil, html: String? = nil) {
+    init(
+        text: String? = nil,
+        lines: [String]? = nil,
+        html: String? = nil,
+        faces: [FaceObservation]? = nil,
+        barcodes: [BarcodeObservation]? = nil,
+        audio: String? = nil
+    ) {
         self.text = text
         self.lines = lines
         self.html = html
+        self.faces = faces
+        self.barcodes = barcodes
+        self.audio = audio
     }
 }
 
@@ -204,6 +282,40 @@ struct APIEndpoint: Identifiable, Equatable {
                 "waitUntil": "networkidle0",
                 "timeout": 30000
               }
+            }
+            """
+        ),
+        APIEndpoint(
+            name: "Face Detection",
+            method: "POST",
+            path: "/api/face",
+            summary: "Detect faces with Vision and return bounding boxes, facial landmarks, and a feature vector per face. Provide exactly one of url / base64 / file. GET supported via ?url=",
+            requestDemo: """
+            {
+              "url": "https://example.com/photo.jpg"
+            }
+            """
+        ),
+        APIEndpoint(
+            name: "QR / Barcode",
+            method: "POST",
+            path: "/api/qrcode",
+            summary: "Detect QR codes and barcodes with Vision and return their decoded payloads and symbologies. Provide exactly one of url / base64 / file. GET supported via ?url=",
+            requestDemo: """
+            {
+              "url": "https://example.com/qr.png"
+            }
+            """
+        ),
+        APIEndpoint(
+            name: "Text to Speech",
+            method: "POST",
+            path: "/api/tts",
+            summary: "Synthesize speech from text and return base64-encoded audio. \"voice\", \"language\", \"rate\", \"pitch\", and \"volume\" are optional. GET supported via ?text=",
+            requestDemo: """
+            {
+              "text": "Hello, world",
+              "language": "en-US"
             }
             """
         )
@@ -311,18 +423,42 @@ enum HTTPRequestParser {
 }
 
 enum APIRequestDecoder {
-    static func decodeOCRRequest(from request: HTTPRequestMessage) throws -> OCRRequestPayload {
+    /// Decodes an image-input request (OCR, face, barcode). For GET, requires
+    /// `?url=`; for POST, requires a JSON body with exactly one of
+    /// url / base64 / file. `path` is used only to build helpful error messages.
+    static func decodeImageRequest(from request: HTTPRequestMessage, path: String) throws -> ImageRequestPayload {
         switch request.method {
         case .get:
             guard let url = queryItem(named: "url", in: request.queryItems), !url.isEmpty else {
-                throw APIRequestError.badRequest("GET /api/ocr requires ?url=")
+                throw APIRequestError.badRequest("GET \(path) requires ?url=")
             }
 
-            return OCRRequestPayload(url: url, base64: nil, file: nil)
+            return ImageRequestPayload(url: url, base64: nil, file: nil)
         case .post:
-            let payload = try decodeJSON(OCRRequestPayload.self, from: request.body)
+            let payload = try decodeJSON(ImageRequestPayload.self, from: request.body)
             _ = try payload.source()
             return payload
+        }
+    }
+
+    static func decodeTTSRequest(from request: HTTPRequestMessage) throws -> TTSRequestPayload {
+        switch request.method {
+        case .get:
+            guard let text = queryItem(named: "text", in: request.queryItems), !text.isEmpty else {
+                throw APIRequestError.badRequest("GET /api/tts requires ?text=")
+            }
+
+            return try TTSRequestPayload(
+                text: text,
+                voice: queryItem(named: "voice", in: request.queryItems),
+                language: queryItem(named: "language", in: request.queryItems),
+                rate: queryItem(named: "rate", in: request.queryItems).flatMap(Float.init),
+                pitch: queryItem(named: "pitch", in: request.queryItems).flatMap(Float.init),
+                volume: queryItem(named: "volume", in: request.queryItems).flatMap(Float.init)
+            ).validated()
+        case .post:
+            let payload = try decodeJSON(TTSRequestPayload.self, from: request.body)
+            return try payload.validated()
         }
     }
 

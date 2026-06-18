@@ -17,7 +17,7 @@ import Testing
     #expect(try HTTPRequestParser.parse(buffer: raw) == nil)
 }
 
-@Test func decodesGetOCRRequestFromQuery() throws {
+@Test func decodesGetImageRequestFromQuery() throws {
     let request = HTTPRequestMessage(
         method: .get,
         target: "/api/ocr?url=https://example.com/image.png",
@@ -27,17 +27,99 @@ import Testing
         body: Data()
     )
 
-    let payload = try APIRequestDecoder.decodeOCRRequest(from: request)
+    let payload = try APIRequestDecoder.decodeImageRequest(from: request, path: request.path)
 
-    #expect(payload == OCRRequestPayload(url: "https://example.com/image.png", base64: nil, file: nil))
+    #expect(payload == ImageRequestPayload(url: "https://example.com/image.png", base64: nil, file: nil))
     #expect(try payload.source() == .url("https://example.com/image.png"))
 }
 
-@Test func rejectsMultipleOCRSources() throws {
-    let payload = OCRRequestPayload(url: "https://example.com/a.png", base64: "abc", file: nil)
+@Test func rejectsMultipleImageSources() throws {
+    let payload = ImageRequestPayload(url: "https://example.com/a.png", base64: "abc", file: nil)
 
     #expect(throws: APIRequestError.self) {
         _ = try payload.source()
+    }
+}
+
+@Test func decodesGetFaceRequestFromQuery() throws {
+    let request = HTTPRequestMessage(
+        method: .get,
+        target: "/api/face?url=https://example.com/photo.jpg",
+        path: "/api/face",
+        queryItems: [URLQueryItem(name: "url", value: "https://example.com/photo.jpg")],
+        headers: [:],
+        body: Data()
+    )
+
+    let payload = try APIRequestDecoder.decodeImageRequest(from: request, path: request.path)
+
+    #expect(try payload.source() == .url("https://example.com/photo.jpg"))
+}
+
+@Test func rejectsGetImageRequestWithoutURL() throws {
+    let request = HTTPRequestMessage(
+        method: .get,
+        target: "/api/qrcode",
+        path: "/api/qrcode",
+        queryItems: [],
+        headers: [:],
+        body: Data()
+    )
+
+    #expect(throws: APIRequestError.self) {
+        _ = try APIRequestDecoder.decodeImageRequest(from: request, path: request.path)
+    }
+}
+
+@Test func decodesGetTTSRequestFromQuery() throws {
+    let request = HTTPRequestMessage(
+        method: .get,
+        target: "/api/tts?text=Hello&language=en-US&rate=0.5",
+        path: "/api/tts",
+        queryItems: [
+            URLQueryItem(name: "text", value: "Hello"),
+            URLQueryItem(name: "language", value: "en-US"),
+            URLQueryItem(name: "rate", value: "0.5")
+        ],
+        headers: [:],
+        body: Data()
+    )
+
+    let payload = try APIRequestDecoder.decodeTTSRequest(from: request)
+
+    #expect(payload.text == "Hello")
+    #expect(payload.language == "en-US")
+    #expect(payload.rate == 0.5)
+}
+
+@Test func decodesPostTTSRequestBody() throws {
+    let request = HTTPRequestMessage(
+        method: .post,
+        target: "/api/tts",
+        path: "/api/tts",
+        queryItems: [],
+        headers: ["content-type": "application/json"],
+        body: Data("{\"text\":\"Hello, world\",\"language\":\"en-US\"}".utf8)
+    )
+
+    let payload = try APIRequestDecoder.decodeTTSRequest(from: request)
+
+    #expect(payload.text == "Hello, world")
+    #expect(payload.language == "en-US")
+}
+
+@Test func rejectsEmptyTTSText() throws {
+    let request = HTTPRequestMessage(
+        method: .post,
+        target: "/api/tts",
+        path: "/api/tts",
+        queryItems: [],
+        headers: ["content-type": "application/json"],
+        body: Data("{\"text\":\"   \"}".utf8)
+    )
+
+    #expect(throws: APIRequestError.self) {
+        _ = try APIRequestDecoder.decodeTTSRequest(from: request)
     }
 }
 
