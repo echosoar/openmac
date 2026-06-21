@@ -20,6 +20,12 @@ By default OpenMac listens on `http://localhost:8080`. Every `/api/*` endpoint r
 
 On error `success` is `false`, `data` is `{}`, and `message` explains why. `timeCost` is the server processing time in milliseconds. Image-input endpoints (`/api/ocr`, `/api/face`, `/api/qrcode`) accept exactly one of `url`, `base64`, or `file`.
 
+### Skill Documentation — `GET /SKILL.md`
+
+```
+http://localhost:8080/SKILL.md
+```
+
 ### OCR / Text Recognition — `POST|GET /api/ocr`
 
 Recognizes text in an image using the Vision framework.
@@ -303,13 +309,4 @@ curl -X POST "http://localhost:8080/api/tts" \
 
 `data.audio` is a base64-encoded WAV file.
 
-### Skill Documentation — `GET /SKILL.md`
-
-Returns this API catalog as Markdown. The addresses reflect the host and port used to reach the server.
-
-```
-curl "http://localhost:8080/SKILL.md"
-```
-
-Returns `text/markdown` directly, not the JSON envelope.
 
