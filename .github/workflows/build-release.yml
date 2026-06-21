@@ -1,0 +1,143 @@
+name: Automated Release
+
+on:
+  push:
+    branches:
+      - main
+    # Reduce unnecessary triggers when only version files change
+    paths-ignore:
+      - 'version.txt'
+      - 'openmac.xcodeproj/project.pbxproj'
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check commit message
+        id: check
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          COMMIT_TITLE=$(git log -1 --pretty=%s)
+
+          if [[ "$COMMIT_MSG" == *"Bump version to"* ]]; then
+            echo "This is a version bump commit, skipping build"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "has_release=false" >> $GITHUB_OUTPUT
+          elif [[ "$COMMIT_TITLE" == *"release"* ]] || [[ "$COMMIT_TITLE" == *"Release"* ]] || [[ "$COMMIT_TITLE" == *"RELEASE"* ]]; then
+            echo "Commit title contains 'release', proceeding"
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "has_release=true" >> $GITHUB_OUTPUT
+            echo "commit_message<<EOF" >> $GITHUB_OUTPUT
+            echo "$COMMIT_MSG" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "Commit title does not contain 'release', skipping"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "has_release=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Read current version
+        if: steps.check.outputs.skip != 'true'
+        id: version
+        run: |
+          CURRENT_VERSION=$(cat version.txt)
+          echo "Current version: $CURRENT_VERSION"
+          # Expose the current version as a step output so subsequent steps use this old version
+          echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Package .github/app.zip for release
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if [ ! -f ".github/app.zip" ]; then
+            echo "Error: .github/app.zip not found"
+            exit 1
+          fi
+
+          mkdir -p artifacts
+          # Publish a versioned copy alongside the stable app.zip alias.
+          cp .github/app.zip "./artifacts/openmac-${VERSION}.zip"
+          cp .github/app.zip "./artifacts/app.zip"
+
+          echo "Packaged:"
+          ls -la artifacts/
+
+      - name: Create tag and push
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="v${VERSION}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists, skipping tag creation"
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+            echo "Created and pushed tag: $TAG"
+          fi
+
+      - name: Create GitHub Release and upload app.zip
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_FOR_PUBLISH }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="v${VERSION}"
+          ZIP_PATH="./artifacts/openmac-${VERSION}.zip"
+          APP_ZIP_PATH="./artifacts/app.zip"
+
+          if [ ! -f "$ZIP_PATH" ]; then
+            echo "Error: app.zip not found at $ZIP_PATH"
+            exit 1
+          fi
+
+          COMMIT_MSG="${{ steps.check.outputs.commit_message }}"
+
+          if command -v gh > /dev/null 2>&1; then
+            if gh release view "$TAG" > /dev/null 2>&1; then
+              echo "Release $TAG already exists, uploading asset..."
+              gh release upload "$TAG" "$ZIP_PATH" "$APP_ZIP_PATH" --clobber
+            else
+              echo "Creating release $TAG..."
+              gh release create "$TAG" \
+                --title "OpenMac ${VERSION}" \
+                --notes "${COMMIT_MSG}" \
+                "$ZIP_PATH" "$APP_ZIP_PATH"
+            fi
+            gh release edit "$TAG" --latest
+          else
+            echo "Warning: gh CLI not available; skipping release creation step."
+          fi
+
+      - name: Bump version, update project and commit
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          # Read current version (the one used for packaging)
+          CURRENT_VERSION=$(cat version.txt)
+          echo "Current version: $CURRENT_VERSION"
+          IFS='.' read -r -a version_parts <<< "$CURRENT_VERSION"
+          MAJOR="${version_parts[0]}"
+          MINOR="${version_parts[1]}"
+          NEW_MINOR=$((MINOR + 1))
+          NEW_VERSION="${MAJOR}.${NEW_MINOR}"
+          echo "Bumping to new version: $NEW_VERSION"
+          # Update version.txt
+          echo "$NEW_VERSION" > version.txt
+
+          # Update Xcode project MARKETING_VERSION and CURRENT_PROJECT_VERSION
+          BUILD_NUMBER=$(echo "$NEW_VERSION" | tr -d '.')
+          sed -i '' "s/MARKETING_VERSION = [^;]*/MARKETING_VERSION = $NEW_VERSION/g" openmac.xcodeproj/project.pbxproj || true
+          sed -i '' "s/CURRENT_PROJECT_VERSION = [^;]*/CURRENT_PROJECT_VERSION = $BUILD_NUMBER/g" openmac.xcodeproj/project.pbxproj || true
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add version.txt openmac.xcodeproj/project.pbxproj
+          git commit -m "Bump version to ${NEW_VERSION}" || echo "No changes to commit"
+          git push
