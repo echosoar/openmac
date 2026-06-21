@@ -83,6 +83,23 @@ enum ImageSource: Equatable {
     case file(String)
 }
 
+/// Face detection request. Extends the image-input model with an optional
+/// `draw` flag that, when true, asks the server to overlay detected bounding
+/// boxes and facial landmarks on the source image and return the marked image
+/// as base64 in the response.
+struct FaceRequestPayload: Codable, Equatable {
+    var url: String?
+    var base64: String?
+    var file: String?
+    var draw: Bool?
+
+    func imageSource() throws -> ImageSource {
+        try ImageRequestPayload(url: url, base64: base64, file: file).source()
+    }
+
+    var resolvedDraw: Bool { draw ?? false }
+}
+
 /// Text-to-speech request. `text` is required; the rest tune voice selection
 /// and delivery and fall back to system defaults when omitted.
 struct TTSRequestPayload: Codable, Equatable {
@@ -173,6 +190,7 @@ struct APIResponseData: Encodable, Equatable {
     let faces: [FaceObservation]?
     let barcodes: [BarcodeObservation]?
     let audio: String?
+    let image: String?
 
     init(
         text: String? = nil,
@@ -180,7 +198,8 @@ struct APIResponseData: Encodable, Equatable {
         html: String? = nil,
         faces: [FaceObservation]? = nil,
         barcodes: [BarcodeObservation]? = nil,
-        audio: String? = nil
+        audio: String? = nil,
+        image: String? = nil
     ) {
         self.text = text
         self.lines = lines
@@ -188,6 +207,7 @@ struct APIResponseData: Encodable, Equatable {
         self.faces = faces
         self.barcodes = barcodes
         self.audio = audio
+        self.image = image
     }
 }
 
@@ -431,24 +451,30 @@ struct APIEndpoint: Identifiable, Equatable {
             name: "Face Detection",
             method: "POST",
             path: "/api/face",
-            summary: "Detect faces with Vision and return bounding boxes, facial landmarks, and a feature vector per face. Provide exactly one of url / base64 / file. GET supported via ?url=",
+            summary: "Detect faces with Vision and return bounding boxes, facial landmarks, and a feature vector per face. Provide exactly one of url / base64 / file. Set draw=true to also return an annotated image. GET supported via ?url=&draw=",
             requestDemo: """
             {
-              "url": "https://example.com/photo.jpg"
+              "url": "https://example.com/photo.jpg",
+              "draw": true
             }
             """,
-            details: "Detects faces using Vision (`VNDetectFaceLandmarksRequest`). For each face it returns a normalized bounding box, pose angles (`roll` / `yaw` / `pitch` in radians, may be null), named facial-landmark point groups (coordinates normalized within the face bounding box), and a `featureVector` (a Vision feature print of the face region) suitable for comparing faces.",
+            details: "Detects faces using Vision (`VNDetectFaceLandmarksRequest`). For each face it returns a normalized bounding box, pose angles (`roll` / `yaw` / `pitch` in radians, may be null), named facial-landmark point groups (coordinates normalized within the face bounding box), and a `featureVector` (a Vision feature print of the face region) suitable for comparing faces. When `draw` is `true`, the server overlays each face's bounding box (red thin line) and facial landmarks (blue thin line) on the source image and returns the annotated PNG as `data.image` (base64-encoded).",
             getParameters: """
             | Parameter | Required | Description |
             |---|---|---|
             | `url` | yes | Publicly reachable image URL to analyze. |
+            | `draw` | no | `true` to return an annotated image. Default `false`. |
             """,
-            getExampleQuery: "url=https://example.com/photo.jpg",
+            getExampleQuery: "url=https://example.com/photo.jpg&draw=true",
             postParameters: """
-            JSON body with **exactly one** of `url`, `base64`, or `file` (same as OCR).
+            JSON body with **exactly one** of `url`, `base64`, or `file` (same as OCR), plus the optional field:
+
+            | Field | Type | Required | Description |
+            |---|---|---|---|
+            | `draw` | boolean | no | `true` to return an annotated image with bounding boxes (red) and landmarks (blue) drawn on the source image. Default `false`. |
             """,
             responseFormat: """
-            `data.faces` is an array. Coordinates are normalized to `0...1` with the origin at the bottom-left, matching Vision. `featureVector` may be `null` if the feature print could not be generated.
+            `data.faces` is an array. Coordinates are normalized to `0...1` with the origin at the bottom-left, matching Vision. `featureVector` may be `null` if the feature print could not be generated. When `draw` is `true`, `data.image` is a base64-encoded PNG of the source image with annotations overlaid.
 
             ```json
             {
@@ -467,7 +493,8 @@ struct APIEndpoint: Identifiable, Equatable {
                     },
                     "featureVector": [0.12, 0.98, ...]
                   }
-                ]
+                ],
+                "image": "iVBORw0KGgo..."
               },
               "message": ""
             }
@@ -582,9 +609,11 @@ enum SkillDocument {
     static func markdown(baseURL: String, endpoints: [APIEndpoint] = APIEndpoint.all) -> String {
         var sections = [String]()
         sections.append("""
-        # OpenMac Skills
-
-        OpenMac runs a local HTTP server that exposes native macOS capabilities (Vision, Translation, WebKit, AVFoundation) as simple HTTP APIs.
+        ---
+        name: OpenMac
+        description: OpenMac runs a local HTTP server and provides APIs for image OCR recognition, multilingual translation, web page content retrieval, face and facial location recognition, QR code/barcode recognition in images, and text-to-speech (TTS) capabilities. This service is based on the above functions provided by the native macOS system and is completely free without incurring any additional costs.
+        version: \(appVersion())
+        ---
 
         - **Base URL:** `\(normalizedBaseURL(baseURL))`
         - Every `/api/*` endpoint returns a JSON envelope: `{ "success": boolean, "timeCost": number, "data": object, "message": string }`. On success `success` is `true` and the endpoint-specific payload is in `data`; on error `success` is `false`, `data` is `{}`, and `message` explains why.
@@ -596,6 +625,13 @@ enum SkillDocument {
         }
 
         return sections.joined(separator: "\n\n") + "\n"
+    }
+
+    /// Reads the app's marketing version (`CFBundleShortVersionString`) from the
+    /// main bundle, falling back to `0.0.0` when unavailable (e.g. running tests
+    /// outside a bundled app).
+    private static func appVersion() -> String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
     }
 
     private static func section(for endpoint: APIEndpoint, baseURL: String) -> String {
@@ -785,6 +821,24 @@ enum APIRequestDecoder {
         case .post:
             let payload = try decodeJSON(ImageRequestPayload.self, from: request.body)
             _ = try payload.source()
+            return payload
+        }
+    }
+
+    /// Decodes a face-detection request. Like `decodeImageRequest` but also
+    /// reads the optional `draw` flag (GET: `?draw=true`, POST: JSON `draw`).
+    static func decodeFaceRequest(from request: HTTPRequestMessage) throws -> FaceRequestPayload {
+        switch request.method {
+        case .get:
+            guard let url = queryItem(named: "url", in: request.queryItems), !url.isEmpty else {
+                throw APIRequestError.badRequest("GET /api/face requires ?url=")
+            }
+
+            let draw = queryItem(named: "draw", in: request.queryItems)?.lowercased() == "true"
+            return FaceRequestPayload(url: url, base64: nil, file: nil, draw: draw)
+        case .post:
+            let payload = try decodeJSON(FaceRequestPayload.self, from: request.body)
+            _ = try payload.imageSource()
             return payload
         }
     }

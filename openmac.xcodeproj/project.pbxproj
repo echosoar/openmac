@@ -7,12 +7,15 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		5B87580B2FE7B9C100DD9159 /* Assets.xcassets    .xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5B87580A2FE7B9C100DD9159 /* Assets.xcassets    .xcassets */; };
 		A1B2C3D4E5F6000000000001 /* openmac.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6000000000011 /* openmac.swift */; };
 		A1B2C3D4E5F6000000000002 /* OpenMacCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6000000000012 /* OpenMacCore.swift */; };
 		A1B2C3D4E5F6000000000003 /* OpenMacServer_macOS.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6000000000013 /* OpenMacServer_macOS.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		5B87580A2FE7B9C100DD9159 /* Assets.xcassets    .xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Assets.xcassets    .xcassets"; sourceTree = "<group>"; };
+		5B87580C2FE7D30400DD9159 /* openmac.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = openmac.entitlements; sourceTree = "<group>"; };
 		A1B2C3D4E5F6000000000011 /* openmac.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = openmac.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F6000000000012 /* OpenMacCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenMacCore.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F6000000000013 /* OpenMacServer_macOS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenMacServer_macOS.swift; sourceTree = "<group>"; };
@@ -33,12 +36,14 @@
 		A1B2C3D4E5F6000000000031 = {
 			isa = PBXGroup;
 			children = (
-				A1B2C3D4E5F6000000000032 /* Sources */,
+				5B87580C2FE7D30400DD9159 /* openmac.entitlements */,
+				5B87580A2FE7B9C100DD9159 /* Assets.xcassets    .xcassets */,
+				A1B2C3D4E5F6000000000032 /* Sources/openmac */,
 				A1B2C3D4E5F6000000000033 /* Products */,
 			);
 			sourceTree = "<group>";
 		};
-		A1B2C3D4E5F6000000000032 /* Sources */ = {
+		A1B2C3D4E5F6000000000032 /* Sources/openmac */ = {
 			isa = PBXGroup;
 			children = (
 				A1B2C3D4E5F6000000000011 /* openmac.swift */,
@@ -114,6 +119,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				5B87580B2FE7B9C100DD9159 /* Assets.xcassets    .xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -160,8 +166,16 @@
 		A1B2C3D4E5F6000000000063 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
+				CODE_SIGN_ENTITLEMENTS = openmac.entitlements;
+				CODE_SIGN_IDENTITY = "Developer ID Application";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Developer ID Application";
+				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				"DEVELOPMENT_TEAM[sdk=macosx*]" = GS6A4SC9KD;
+				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = openmac;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -169,20 +183,29 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.echosoar.openmac;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
-				SWIFT_VERSION = 5.0;
 				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_VERSION = 5.0;
 			};
 			name = Debug;
 		};
 		A1B2C3D4E5F6000000000064 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
+				CODE_SIGN_ENTITLEMENTS = openmac.entitlements;
+				CODE_SIGN_IDENTITY = "Developer ID Application";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Developer ID Application";
+				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				"DEVELOPMENT_TEAM[sdk=macosx*]" = GS6A4SC9KD;
+				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = openmac;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -190,12 +213,13 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.echosoar.openmac;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
-				SWIFT_VERSION = 5.0;
 				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_VERSION = 5.0;
 			};
 			name = Release;
 		};

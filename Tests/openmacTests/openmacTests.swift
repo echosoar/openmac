@@ -51,9 +51,45 @@ import Testing
         body: Data()
     )
 
-    let payload = try APIRequestDecoder.decodeImageRequest(from: request, path: request.path)
+    let payload = try APIRequestDecoder.decodeFaceRequest(from: request)
 
-    #expect(try payload.source() == .url("https://example.com/photo.jpg"))
+    #expect(try payload.imageSource() == .url("https://example.com/photo.jpg"))
+    #expect(payload.resolvedDraw == false)
+}
+
+@Test func decodesGetFaceRequestWithDraw() throws {
+    let request = HTTPRequestMessage(
+        method: .get,
+        target: "/api/face?url=https://example.com/photo.jpg&draw=true",
+        path: "/api/face",
+        queryItems: [
+            URLQueryItem(name: "url", value: "https://example.com/photo.jpg"),
+            URLQueryItem(name: "draw", value: "true")
+        ],
+        headers: [:],
+        body: Data()
+    )
+
+    let payload = try APIRequestDecoder.decodeFaceRequest(from: request)
+
+    #expect(try payload.imageSource() == .url("https://example.com/photo.jpg"))
+    #expect(payload.resolvedDraw == true)
+}
+
+@Test func decodesPostFaceRequestWithDraw() throws {
+    let request = HTTPRequestMessage(
+        method: .post,
+        target: "/api/face",
+        path: "/api/face",
+        queryItems: [],
+        headers: ["content-type": "application/json"],
+        body: Data("{\"url\":\"https://example.com/photo.jpg\",\"draw\":true}".utf8)
+    )
+
+    let payload = try APIRequestDecoder.decodeFaceRequest(from: request)
+
+    #expect(try payload.imageSource() == .url("https://example.com/photo.jpg"))
+    #expect(payload.resolvedDraw == true)
 }
 
 @Test func rejectsGetImageRequestWithoutURL() throws {

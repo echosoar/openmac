@@ -386,10 +386,10 @@ private struct OpenMacRequestRouter {
     }
 
     private func handleFace(_ request: HTTPRequestMessage) async throws -> APIResponseData {
-        let payload = try APIRequestDecoder.decodeImageRequest(from: request, path: request.path)
-        let imageData = try await ImageDataLoader().load(from: try payload.source())
-        let faces = try FaceDetectionService().detectFaces(in: imageData)
-        return APIResponseData(faces: faces)
+        let payload = try APIRequestDecoder.decodeFaceRequest(from: request)
+        let imageData = try await ImageDataLoader().load(from: try payload.imageSource())
+        let result = try FaceDetectionService().detectFaces(in: imageData, draw: payload.resolvedDraw)
+        return APIResponseData(faces: result.faces, image: result.markedImage?.base64EncodedString())
     }
 
     private func handleQRCode(_ request: HTTPRequestMessage) async throws -> APIResponseData {
@@ -479,7 +479,12 @@ private extension BoundingBox {
 }
 
 private struct FaceDetectionService {
-    func detectFaces(in imageData: Data) throws -> [FaceObservation] {
+    struct Result {
+        let faces: [FaceObservation]
+        let markedImage: Data?
+    }
+
+    func detectFaces(in imageData: Data, draw: Bool = false) throws -> Result {
         guard let imageSource = CGImageSourceCreateWithData(imageData as CFData, nil),
               let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
             throw APIRequestError.badRequest("Unable to decode image data")
@@ -490,7 +495,7 @@ private struct FaceDetectionService {
         try handler.perform([request])
         let observations = (request.results) ?? []
 
-        return observations.map { observation in
+        let faces = observations.map { observation in
             FaceObservation(
                 boundingBox: BoundingBox(observation.boundingBox),
                 roll: observation.roll?.doubleValue,
@@ -500,6 +505,114 @@ private struct FaceDetectionService {
                 featureVector: featureVector(for: observation, in: cgImage)
             )
         }
+
+        let markedImage: Data? = draw ? drawAnnotations(on: cgImage, observations: observations) : nil
+        return Result(faces: faces, markedImage: markedImage)
+    }
+
+    /// Overlays each face's bounding box (red thin line) and facial landmarks
+    /// (blue thin line) on the source image, returning the annotated image as
+    /// PNG data. Returns nil if the drawing context or encoding fails.
+    private func drawAnnotations(on cgImage: CGImage, observations: [VNFaceObservation]) -> Data? {
+        let width = cgImage.width
+        let height = cgImage.height
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return nil
+        }
+
+        // Vision and CGContext both use bottom-left origin, so normalized
+        // coordinates map directly to the context without flipping.
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        let boxLineWidth = max(1, CGFloat(width) / 500)
+        let landmarkLineWidth = boxLineWidth * 0.6
+
+        // Bounding boxes in red.
+        context.setStrokeColor(CGColor(srgbRed: 1, green: 0, blue: 0, alpha: 1))
+        context.setLineWidth(boxLineWidth)
+        for observation in observations {
+            let bbox = observation.boundingBox
+            let rect = CGRect(
+                x: bbox.origin.x * CGFloat(width),
+                y: bbox.origin.y * CGFloat(height),
+                width: bbox.width * CGFloat(width),
+                height: bbox.height * CGFloat(height)
+            )
+            context.stroke(rect)
+        }
+
+        // Landmarks in blue. Vision's landmark `normalizedPoints` are relative
+        // to the face bounding box, so resolve them into image space first.
+        context.setStrokeColor(CGColor(srgbRed: 0, green: 0, blue: 1, alpha: 1))
+        context.setLineWidth(landmarkLineWidth)
+        for observation in observations {
+            guard let faceLandmarks = observation.landmarks else { continue }
+            let bbox = observation.boundingBox
+            let originX = bbox.origin.x * CGFloat(width)
+            let originY = bbox.origin.y * CGFloat(height)
+            let scaleW = bbox.width * CGFloat(width)
+            let scaleH = bbox.height * CGFloat(height)
+
+            for region in landmarkRegions(from: faceLandmarks) {
+                strokeRegion(region, originX: originX, originY: originY, scaleW: scaleW, scaleH: scaleH, in: context)
+            }
+        }
+
+        guard let outputImage = context.makeImage() else { return nil }
+        let mutableData = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(mutableData, "public.png" as CFString, 1, nil) else {
+            return nil
+        }
+        CGImageDestinationAddImage(destination, outputImage, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return mutableData as Data
+    }
+
+    private func landmarkRegions(from landmarks: VNFaceLandmarks2D) -> [VNFaceLandmarkRegion2D] {
+        let regions: [VNFaceLandmarkRegion2D?] = [
+            landmarks.faceContour,
+            landmarks.leftEye,
+            landmarks.rightEye,
+            landmarks.leftEyebrow,
+            landmarks.rightEyebrow,
+            landmarks.nose,
+            landmarks.noseCrest,
+            landmarks.medianLine,
+            landmarks.outerLips,
+            landmarks.innerLips,
+            landmarks.leftPupil,
+            landmarks.rightPupil
+        ]
+        return regions.compactMap { $0 }
+    }
+
+    private func strokeRegion(_ region: VNFaceLandmarkRegion2D, originX: CGFloat, originY: CGFloat, scaleW: CGFloat, scaleH: CGFloat, in context: CGContext) {
+        let points = region.normalizedPoints
+        guard points.count > 1 else { return }
+
+        context.beginPath()
+        for (index, point) in points.enumerated() {
+            let x = originX + point.x * scaleW
+            let y = originY + point.y * scaleH
+            if index == 0 {
+                context.move(to: CGPoint(x: x, y: y))
+            } else {
+                context.addLine(to: CGPoint(x: x, y: y))
+            }
+        }
+        // Close the polygon so contours like eyes/lips form a loop.
+        if let first = points.first {
+            context.addLine(to: CGPoint(x: originX + first.x * scaleW, y: originY + first.y * scaleH))
+        }
+        context.strokePath()
     }
 
     /// Generates a feature-print vector for a single face by restricting the
@@ -917,12 +1030,12 @@ private struct TranslationBridgeView: View {
 }
 
 struct OpenMacView: View {
-    @StateObject private var model = OpenMacAppModel()
+    @EnvironmentObject private var model: OpenMacAppModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                Text("Supported APIs")
+                Text("APIs")
                     .font(.headline)
                 Spacer()
                 TextField("Port", text: $model.portText)
@@ -1009,18 +1122,20 @@ private struct APIEndpointRow: View {
                 .help("Copy API address")
             }
 
-            DisclosureGroup(isExpanded: $isExpanded) {
-                Text(endpoint.requestDemo)
-                    .font(.system(.caption, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
-                    .background(Color.secondary.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .padding(.top, 4)
-            } label: {
-                Text("Request body demo")
-                    .font(.caption.weight(.medium))
+            if endpoint.postParameters != nil {
+                DisclosureGroup(isExpanded: $isExpanded) {
+                    Text(endpoint.requestDemo)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .background(Color.secondary.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .padding(.top, 4)
+                } label: {
+                    Text("Request body demo")
+                        .font(.caption.weight(.medium))
+                }
             }
         }
         .padding(12)
