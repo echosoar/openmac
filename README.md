@@ -34,3 +34,6 @@ xcodebuild -project openmac.xcodeproj -scheme openmac -configuration Debug CODE_
 - `POST /api/tts` with JSON `{ "text": "...", "language": "en-US", "voice": "...", "rate": 0.5, "pitch": 1.0, "volume": 1.0 }` (only `text` is required)
 - `GET /api/tts?text=...&language=...&voice=...&rate=...&pitch=...&volume=...`
 - Synthesizes speech and returns `{ "audio": "<base64 WAV>" }`
+- `GET /SKILL.md`
+- Returns a human-readable Markdown document describing every endpoint: its address, detailed description, GET/POST parameters, and response format
+- Addresses are derived from the request `Host` header, so they automatically reflect the current host and port

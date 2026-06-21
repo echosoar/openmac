@@ -289,6 +289,12 @@ private struct OpenMacRequestRouter {
     func response(for request: HTTPRequestMessage) async -> Data {
         let start = Date()
         openmacLog("--> \(request.method.rawValue) \(request.target)")
+
+        // /SKILL.md is documentation served as Markdown, not the JSON envelope.
+        if request.path == "/SKILL.md" {
+            return skillDocumentResponse(for: request, start: start)
+        }
+
         do {
             let data: APIResponseData
             switch request.path {
@@ -324,6 +330,33 @@ private struct OpenMacRequestRouter {
 
     private static func elapsedMilliseconds(since start: Date) -> Int {
         Int((Date().timeIntervalSince(start) * 1000).rounded())
+    }
+
+    /// Serves the skill catalog as Markdown. The base URL is derived from the
+    /// request `Host` header so the addresses always match the host and port
+    /// the caller actually used.
+    private func skillDocumentResponse(for request: HTTPRequestMessage, start: Date) -> Data {
+        guard request.method == .get else {
+            let timeCost = Self.elapsedMilliseconds(since: start)
+            openmacLog("<-- \(request.method.rawValue) /SKILL.md 405 (\(timeCost)ms)")
+            return HTTPResponseBuilder.failure(statusCode: 405, timeCost: timeCost, message: "/SKILL.md only supports GET")
+        }
+
+        let markdown = SkillDocument.markdown(baseURL: Self.baseURL(from: request))
+        let body = Data(markdown.utf8)
+        let timeCost = Self.elapsedMilliseconds(since: start)
+        openmacLog("<-- GET /SKILL.md 200 (\(body.count) bytes, \(timeCost)ms)")
+        return HTTPResponseBuilder.build(statusCode: 200, contentType: "text/markdown; charset=utf-8", body: body)
+    }
+
+    /// Builds `http://<host>` from the request `Host` header (which already
+    /// includes the port the client connected to), falling back to localhost.
+    private static func baseURL(from request: HTTPRequestMessage) -> String {
+        if let host = request.headers["host"]?.trimmingCharacters(in: .whitespacesAndNewlines), !host.isEmpty {
+            return "http://\(host)"
+        }
+
+        return "http://localhost"
     }
 
     private func handleOCR(_ request: HTTPRequestMessage) async throws -> APIResponseData {

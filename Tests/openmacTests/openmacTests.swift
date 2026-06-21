@@ -192,3 +192,43 @@ import Testing
         _ = try APIRequestDecoder.decodeWebContentRequest(from: request)
     }
 }
+
+
+@Test func skillDocumentReflectsBaseURLForEveryEndpoint() throws {
+    let markdown = SkillDocument.markdown(baseURL: "http://localhost:9090")
+
+    #expect(markdown.hasPrefix("# OpenMac Skills"))
+    #expect(markdown.contains("**Base URL:** `http://localhost:9090`"))
+
+    // Every endpoint's address must be rendered against the supplied base URL.
+    for endpoint in APIEndpoint.all {
+        #expect(markdown.contains("`http://localhost:9090\(endpoint.path)`"))
+    }
+}
+
+@Test func skillDocumentTracksPortChanges() throws {
+    let other = SkillDocument.markdown(baseURL: "http://localhost:1234")
+
+    #expect(other.contains("http://localhost:1234/api/ocr"))
+    #expect(other.contains("http://localhost:1234/SKILL.md"))
+    #expect(!other.contains("localhost:9090"))
+}
+
+@Test func skillDocumentTrimsTrailingSlashInBaseURL() throws {
+    let markdown = SkillDocument.markdown(baseURL: "http://localhost:8080/")
+
+    #expect(markdown.contains("http://localhost:8080/api/tts"))
+    #expect(!markdown.contains("localhost:8080//api"))
+}
+
+@Test func skillDocumentMarksGetOnlyEndpoints() throws {
+    let skill = try #require(APIEndpoint.all.first { $0.path == "/SKILL.md" })
+
+    #expect(skill.supportedMethods == ["GET"])
+}
+
+@Test func skillDocumentMarksDualMethodEndpoints() throws {
+    let ocr = try #require(APIEndpoint.all.first { $0.path == "/api/ocr" })
+
+    #expect(ocr.supportedMethods == ["GET", "POST"])
+}

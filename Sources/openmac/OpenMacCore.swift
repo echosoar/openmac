@@ -229,20 +229,75 @@ private extension String {
 }
 
 /// Metadata describing a public API endpoint, used by the settings UI to list
-/// supported features, show a sample request body, and build a copyable URL.
+/// supported features, show a sample request body, build a copyable URL, and
+/// render the `GET /SKILL.md` documentation.
 struct APIEndpoint: Identifiable, Equatable {
     let name: String
+    /// Primary method shown as the UI badge.
     let method: String
     let path: String
+    /// Short one-line description for the settings UI.
     let summary: String
+    /// Sample JSON request body shown in the UI and used as the POST example.
     let requestDemo: String
+    /// Longer description used by the SKILL.md documentation.
+    let details: String
+    /// Prose/markdown describing GET query parameters. `nil` means GET is not
+    /// supported by this endpoint.
+    let getParameters: String?
+    /// Example query string (without leading `?`) used to build a GET example.
+    let getExampleQuery: String?
+    /// Prose/markdown describing the POST JSON body. `nil` means POST is not
+    /// supported by this endpoint.
+    let postParameters: String?
+    /// Markdown describing the response format.
+    let responseFormat: String
+
+    init(
+        name: String,
+        method: String,
+        path: String,
+        summary: String,
+        requestDemo: String,
+        details: String = "",
+        getParameters: String? = nil,
+        getExampleQuery: String? = nil,
+        postParameters: String? = nil,
+        responseFormat: String = ""
+    ) {
+        self.name = name
+        self.method = method
+        self.path = path
+        self.summary = summary
+        self.requestDemo = requestDemo
+        self.details = details
+        self.getParameters = getParameters
+        self.getExampleQuery = getExampleQuery
+        self.postParameters = postParameters
+        self.responseFormat = responseFormat
+    }
 
     var id: String { "\(method) \(path)" }
+
+    /// Methods this endpoint accepts, derived from which parameter docs exist.
+    var supportedMethods: [String] {
+        var methods = [String]()
+        if getParameters != nil { methods.append("GET") }
+        if postParameters != nil { methods.append("POST") }
+        return methods.isEmpty ? [method] : methods
+    }
 
     func address(host: String, port: String) -> String {
         let trimmedPort = port.trimmingCharacters(in: .whitespacesAndNewlines)
         let portComponent = trimmedPort.isEmpty ? "" : ":\(trimmedPort)"
         return "http://\(host)\(portComponent)\(path)"
+    }
+
+    /// Builds the full address from a base URL (e.g. `http://localhost:8080`),
+    /// tolerating a trailing slash.
+    func address(baseURL: String) -> String {
+        let trimmed = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
+        return "\(trimmed)\(path)"
     }
 
     static let all: [APIEndpoint] = [
@@ -255,6 +310,37 @@ struct APIEndpoint: Identifiable, Equatable {
             {
               "url": "https://example.com/image.png"
             }
+            """,
+            details: "Recognizes text in an image using the Vision framework (`VNRecognizeTextRequest`, accurate recognition level with language correction). Provide the image as a URL, a base64 string, or a local file path — exactly one source.",
+            getParameters: """
+            | Parameter | Required | Description |
+            |---|---|---|
+            | `url` | yes | Publicly reachable image URL to download and analyze. |
+            """,
+            getExampleQuery: "url=https://example.com/image.png",
+            postParameters: """
+            JSON body with **exactly one** of the following fields:
+
+            | Field | Type | Description |
+            |---|---|---|
+            | `url` | string | Image URL to download. |
+            | `base64` | string | Base64-encoded image data (a `data:` URI prefix is allowed). |
+            | `file` | string | Absolute path to a local image file. |
+            """,
+            responseFormat: """
+            `data.text` is all recognized text joined by newlines; `data.lines` is the per-line array.
+
+            ```json
+            {
+              "success": true,
+              "timeCost": 42,
+              "data": {
+                "text": "line 1\\nline 2",
+                "lines": ["line 1", "line 2"]
+              },
+              "message": ""
+            }
+            ```
             """
         ),
         APIEndpoint(
@@ -268,6 +354,34 @@ struct APIEndpoint: Identifiable, Equatable {
               "from": "en",
               "to": "zh"
             }
+            """,
+            details: "Translates text using the native macOS Translation framework. Requires macOS 15 or later (otherwise returns a 500 error). `from` is optional — when omitted the system detects the source language.",
+            getParameters: """
+            | Parameter | Required | Description |
+            |---|---|---|
+            | `text` | yes | Text to translate. |
+            | `to` | yes | Target language code (e.g. `zh`, `ja`, `fr`). |
+            | `from` | no | Source language code; auto-detected when omitted. |
+            """,
+            getExampleQuery: "text=Hello,%20world&from=en&to=zh",
+            postParameters: """
+            | Field | Type | Required | Description |
+            |---|---|---|---|
+            | `text` | string | yes | Text to translate. |
+            | `to` | string | yes | Target language code. |
+            | `from` | string | no | Source language code; auto-detected when omitted. |
+            """,
+            responseFormat: """
+            `data.text` holds the translated text.
+
+            ```json
+            {
+              "success": true,
+              "timeCost": 88,
+              "data": { "text": "你好，世界" },
+              "message": ""
+            }
+            ```
             """
         ),
         APIEndpoint(
@@ -283,6 +397,34 @@ struct APIEndpoint: Identifiable, Equatable {
                 "timeout": 30000
               }
             }
+            """,
+            details: "Loads a URL in a headless WebKit `WKWebView` and returns the fully rendered HTML after the page settles. `waitUntil` selects the readiness signal; `timeout` (milliseconds) caps the wait and returns whatever HTML is available when reached (`0` returns immediately).",
+            getParameters: """
+            | Parameter | Required | Description |
+            |---|---|---|
+            | `url` | yes | Absolute URL to load. |
+            | `waitUntil` | no | One of `domcontentloaded` (default), `networkidle0`, `networkidle2`. |
+            | `timeout` | no | Non-negative milliseconds to wait. Default `30000`. |
+            """,
+            getExampleQuery: "url=https://example.com&waitUntil=networkidle0&timeout=30000",
+            postParameters: """
+            | Field | Type | Required | Description |
+            |---|---|---|---|
+            | `url` | string | yes | Absolute URL to load. |
+            | `gotoOptions.waitUntil` | string | no | `domcontentloaded` / `networkidle0` / `networkidle2`. |
+            | `gotoOptions.timeout` | number | no | Non-negative milliseconds. Default `30000`. |
+            """,
+            responseFormat: """
+            `data.html` contains the rendered outer HTML of the document.
+
+            ```json
+            {
+              "success": true,
+              "timeCost": 1203,
+              "data": { "html": "<!doctype html>..." },
+              "message": ""
+            }
+            ```
             """
         ),
         APIEndpoint(
@@ -294,6 +436,42 @@ struct APIEndpoint: Identifiable, Equatable {
             {
               "url": "https://example.com/photo.jpg"
             }
+            """,
+            details: "Detects faces using Vision (`VNDetectFaceLandmarksRequest`). For each face it returns a normalized bounding box, pose angles (`roll` / `yaw` / `pitch` in radians, may be null), named facial-landmark point groups (coordinates normalized within the face bounding box), and a `featureVector` (a Vision feature print of the face region) suitable for comparing faces.",
+            getParameters: """
+            | Parameter | Required | Description |
+            |---|---|---|
+            | `url` | yes | Publicly reachable image URL to analyze. |
+            """,
+            getExampleQuery: "url=https://example.com/photo.jpg",
+            postParameters: """
+            JSON body with **exactly one** of `url`, `base64`, or `file` (same as OCR).
+            """,
+            responseFormat: """
+            `data.faces` is an array. Coordinates are normalized to `0...1` with the origin at the bottom-left, matching Vision. `featureVector` may be `null` if the feature print could not be generated.
+
+            ```json
+            {
+              "success": true,
+              "timeCost": 130,
+              "data": {
+                "faces": [
+                  {
+                    "boundingBox": { "x": 0.31, "y": 0.42, "width": 0.2, "height": 0.27 },
+                    "roll": 0.05,
+                    "yaw": -0.12,
+                    "pitch": 0.0,
+                    "landmarks": {
+                      "leftEye": [ { "x": 0.4, "y": 0.6 } ],
+                      "nose": [ { "x": 0.5, "y": 0.5 } ]
+                    },
+                    "featureVector": [0.12, 0.98, ...]
+                  }
+                ]
+              },
+              "message": ""
+            }
+            ```
             """
         ),
         APIEndpoint(
@@ -305,6 +483,36 @@ struct APIEndpoint: Identifiable, Equatable {
             {
               "url": "https://example.com/qr.png"
             }
+            """,
+            details: "Detects QR codes and barcodes using Vision (`VNDetectBarcodesRequest`). Returns every detected code with its decoded payload, symbology identifier, and bounding box.",
+            getParameters: """
+            | Parameter | Required | Description |
+            |---|---|---|
+            | `url` | yes | Publicly reachable image URL to analyze. |
+            """,
+            getExampleQuery: "url=https://example.com/qr.png",
+            postParameters: """
+            JSON body with **exactly one** of `url`, `base64`, or `file` (same as OCR).
+            """,
+            responseFormat: """
+            `data.barcodes` is an array. `payload` is the decoded string (may be `null` if undecodable); `symbology` identifies the code type (e.g. `VNBarcodeSymbologyQR`, `VNBarcodeSymbologyEAN13`).
+
+            ```json
+            {
+              "success": true,
+              "timeCost": 35,
+              "data": {
+                "barcodes": [
+                  {
+                    "payload": "https://example.com",
+                    "symbology": "VNBarcodeSymbologyQR",
+                    "boundingBox": { "x": 0.1, "y": 0.1, "width": 0.4, "height": 0.4 }
+                  }
+                ]
+              },
+              "message": ""
+            }
+            ```
             """
         ),
         APIEndpoint(
@@ -317,9 +525,149 @@ struct APIEndpoint: Identifiable, Equatable {
               "text": "Hello, world",
               "language": "en-US"
             }
+            """,
+            details: "Synthesizes speech from text using `AVSpeechSynthesizer` and returns base64-encoded WAV audio. Only `text` is required; the rest tune voice selection and delivery.",
+            getParameters: """
+            | Parameter | Required | Description |
+            |---|---|---|
+            | `text` | yes | Text to speak. |
+            | `language` | no | BCP-47 language code (e.g. `en-US`, `zh-CN`). |
+            | `voice` | no | Specific `AVSpeechSynthesisVoice` identifier. |
+            | `rate` | no | Speech rate (`0.0`–`1.0`). |
+            | `pitch` | no | Pitch multiplier (`0.5`–`2.0`). |
+            | `volume` | no | Volume (`0.0`–`1.0`). |
+            """,
+            getExampleQuery: "text=Hello,%20world&language=en-US",
+            postParameters: """
+            | Field | Type | Required | Description |
+            |---|---|---|---|
+            | `text` | string | yes | Text to speak. |
+            | `language` | string | no | BCP-47 language code. |
+            | `voice` | string | no | `AVSpeechSynthesisVoice` identifier. |
+            | `rate` | number | no | Speech rate (`0.0`–`1.0`). |
+            | `pitch` | number | no | Pitch multiplier (`0.5`–`2.0`). |
+            | `volume` | number | no | Volume (`0.0`–`1.0`). |
+            """,
+            responseFormat: """
+            `data.audio` is a base64-encoded WAV file.
+
+            ```json
+            {
+              "success": true,
+              "timeCost": 210,
+              "data": { "audio": "UklGRi...=" },
+              "message": ""
+            }
+            ```
             """
+        ),
+        APIEndpoint(
+            name: "Skill Documentation",
+            method: "GET",
+            path: "/SKILL.md",
+            summary: "Return this Markdown describing every endpoint: address, parameters, and response format. Addresses reflect the current host and port.",
+            requestDemo: "(no request body)",
+            details: "Returns this Markdown document describing every available skill/endpoint. The addresses shown reflect the host and port you used to reach the server, so they stay correct when the port changes.",
+            getParameters: "No parameters.",
+            getExampleQuery: nil,
+            postParameters: nil,
+            responseFormat: "Returns `text/markdown` (this document) directly, not the JSON envelope used by the `/api/*` endpoints."
         )
     ]
+}
+
+/// Renders the `GET /SKILL.md` document from the endpoint catalog. Addresses are
+/// built from a runtime `baseURL` so they reflect the current host and port.
+enum SkillDocument {
+    static func markdown(baseURL: String, endpoints: [APIEndpoint] = APIEndpoint.all) -> String {
+        var sections = [String]()
+        sections.append("""
+        # OpenMac Skills
+
+        OpenMac runs a local HTTP server that exposes native macOS capabilities (Vision, Translation, WebKit, AVFoundation) as simple HTTP APIs.
+
+        - **Base URL:** `\(normalizedBaseURL(baseURL))`
+        - Every `/api/*` endpoint returns a JSON envelope: `{ "success": boolean, "timeCost": number, "data": object, "message": string }`. On success `success` is `true` and the endpoint-specific payload is in `data`; on error `success` is `false`, `data` is `{}`, and `message` explains why.
+        - `timeCost` is the server processing time in milliseconds.
+        """)
+
+        for endpoint in endpoints {
+            sections.append(section(for: endpoint, baseURL: baseURL))
+        }
+
+        return sections.joined(separator: "\n\n") + "\n"
+    }
+
+    private static func section(for endpoint: APIEndpoint, baseURL: String) -> String {
+        let address = endpoint.address(baseURL: baseURL)
+        var lines = [String]()
+        lines.append("## \(endpoint.name)")
+        lines.append("")
+        if !endpoint.details.isEmpty {
+            lines.append(endpoint.details)
+            lines.append("")
+        }
+        lines.append("- **Path:** `\(endpoint.path)`")
+        lines.append("- **Address:** `\(address)`")
+        lines.append("- **Methods:** \(endpoint.supportedMethods.joined(separator: ", "))")
+
+        if let getParameters = endpoint.getParameters {
+            lines.append("")
+            lines.append("### GET")
+            lines.append(getParameters)
+            let exampleURL: String
+            if let query = endpoint.getExampleQuery, !query.isEmpty {
+                exampleURL = "\(address)?\(query)"
+            } else {
+                exampleURL = address
+            }
+            lines.append("")
+            lines.append("Example:")
+            lines.append("```bash")
+            lines.append("curl \"\(exampleURL)\"")
+            lines.append("```")
+        }
+
+        if let postParameters = endpoint.postParameters {
+            lines.append("")
+            lines.append("### POST")
+            lines.append(postParameters)
+            lines.append("")
+            lines.append("Example:")
+            lines.append("```bash")
+            lines.append("curl -X POST \"\(address)\" \\")
+            lines.append("  -H \"Content-Type: application/json\" \\")
+            lines.append("  -d '\(compactJSON(endpoint.requestDemo))'")
+            lines.append("```")
+        }
+
+        if !endpoint.responseFormat.isEmpty {
+            lines.append("")
+            lines.append("### Response")
+            lines.append(endpoint.responseFormat)
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private static func normalizedBaseURL(_ baseURL: String) -> String {
+        baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
+    }
+
+    /// Collapses a pretty-printed JSON sample into a single line for use in a
+    /// shell `curl` example. Falls back to a newline-stripped version if the
+    /// sample is not valid JSON.
+    private static func compactJSON(_ string: String) -> String {
+        guard let data = string.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let compact = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+              let result = String(data: compact, encoding: .utf8) else {
+            return string.replacingOccurrences(of: "\n", with: " ")
+        }
+
+        // JSONSerialization escapes "/" as "\/"; unescape for a cleaner example.
+        return result.replacingOccurrences(of: "\\/", with: "/")
+    }
 }
 
 enum APIRequestError: Error, Equatable, LocalizedError {
