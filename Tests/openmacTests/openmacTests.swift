@@ -17,7 +17,7 @@ import Testing
     #expect(try HTTPRequestParser.parse(buffer: raw) == nil)
 }
 
-@Test func decodesGetOCRRequestFromQuery() throws {
+@Test func decodesGetImageRequestFromQuery() throws {
     let request = HTTPRequestMessage(
         method: .get,
         target: "/api/ocr?url=https://example.com/image.png",
@@ -27,17 +27,135 @@ import Testing
         body: Data()
     )
 
-    let payload = try APIRequestDecoder.decodeOCRRequest(from: request)
+    let payload = try APIRequestDecoder.decodeImageRequest(from: request, path: request.path)
 
-    #expect(payload == OCRRequestPayload(url: "https://example.com/image.png", base64: nil, file: nil))
+    #expect(payload == ImageRequestPayload(url: "https://example.com/image.png", base64: nil, file: nil))
     #expect(try payload.source() == .url("https://example.com/image.png"))
 }
 
-@Test func rejectsMultipleOCRSources() throws {
-    let payload = OCRRequestPayload(url: "https://example.com/a.png", base64: "abc", file: nil)
+@Test func rejectsMultipleImageSources() throws {
+    let payload = ImageRequestPayload(url: "https://example.com/a.png", base64: "abc", file: nil)
 
     #expect(throws: APIRequestError.self) {
         _ = try payload.source()
+    }
+}
+
+@Test func decodesGetFaceRequestFromQuery() throws {
+    let request = HTTPRequestMessage(
+        method: .get,
+        target: "/api/face?url=https://example.com/photo.jpg",
+        path: "/api/face",
+        queryItems: [URLQueryItem(name: "url", value: "https://example.com/photo.jpg")],
+        headers: [:],
+        body: Data()
+    )
+
+    let payload = try APIRequestDecoder.decodeFaceRequest(from: request)
+
+    #expect(try payload.imageSource() == .url("https://example.com/photo.jpg"))
+    #expect(payload.resolvedDraw == false)
+}
+
+@Test func decodesGetFaceRequestWithDraw() throws {
+    let request = HTTPRequestMessage(
+        method: .get,
+        target: "/api/face?url=https://example.com/photo.jpg&draw=true",
+        path: "/api/face",
+        queryItems: [
+            URLQueryItem(name: "url", value: "https://example.com/photo.jpg"),
+            URLQueryItem(name: "draw", value: "true")
+        ],
+        headers: [:],
+        body: Data()
+    )
+
+    let payload = try APIRequestDecoder.decodeFaceRequest(from: request)
+
+    #expect(try payload.imageSource() == .url("https://example.com/photo.jpg"))
+    #expect(payload.resolvedDraw == true)
+}
+
+@Test func decodesPostFaceRequestWithDraw() throws {
+    let request = HTTPRequestMessage(
+        method: .post,
+        target: "/api/face",
+        path: "/api/face",
+        queryItems: [],
+        headers: ["content-type": "application/json"],
+        body: Data("{\"url\":\"https://example.com/photo.jpg\",\"draw\":true}".utf8)
+    )
+
+    let payload = try APIRequestDecoder.decodeFaceRequest(from: request)
+
+    #expect(try payload.imageSource() == .url("https://example.com/photo.jpg"))
+    #expect(payload.resolvedDraw == true)
+}
+
+@Test func rejectsGetImageRequestWithoutURL() throws {
+    let request = HTTPRequestMessage(
+        method: .get,
+        target: "/api/qrcode",
+        path: "/api/qrcode",
+        queryItems: [],
+        headers: [:],
+        body: Data()
+    )
+
+    #expect(throws: APIRequestError.self) {
+        _ = try APIRequestDecoder.decodeImageRequest(from: request, path: request.path)
+    }
+}
+
+@Test func decodesGetTTSRequestFromQuery() throws {
+    let request = HTTPRequestMessage(
+        method: .get,
+        target: "/api/tts?text=Hello&language=en-US&rate=0.5",
+        path: "/api/tts",
+        queryItems: [
+            URLQueryItem(name: "text", value: "Hello"),
+            URLQueryItem(name: "language", value: "en-US"),
+            URLQueryItem(name: "rate", value: "0.5")
+        ],
+        headers: [:],
+        body: Data()
+    )
+
+    let payload = try APIRequestDecoder.decodeTTSRequest(from: request)
+
+    #expect(payload.text == "Hello")
+    #expect(payload.language == "en-US")
+    #expect(payload.rate == 0.5)
+}
+
+@Test func decodesPostTTSRequestBody() throws {
+    let request = HTTPRequestMessage(
+        method: .post,
+        target: "/api/tts",
+        path: "/api/tts",
+        queryItems: [],
+        headers: ["content-type": "application/json"],
+        body: Data("{\"text\":\"Hello, world\",\"language\":\"en-US\"}".utf8)
+    )
+
+    let payload = try APIRequestDecoder.decodeTTSRequest(from: request)
+
+    #expect(payload.text == "Hello, world")
+    #expect(payload.language == "en-US")
+}
+
+@Test func rejectsEmptyTTSText() throws {
+    let request = HTTPRequestMessage(
+        method: .post,
+        target: "/api/tts",
+        path: "/api/tts",
+        queryItems: [],
+        headers: ["content-type": "application/json"],
+        body: Data("{\"text\":\"   \"}".utf8)
+    )
+
+    #expect(throws: APIRequestError.self) {
+        _ = try APIRequestDecoder.decodeTTSRequest(from: request)
     }
 }
 
@@ -109,4 +227,44 @@ import Testing
     #expect(throws: APIRequestError.self) {
         _ = try APIRequestDecoder.decodeWebContentRequest(from: request)
     }
+}
+
+
+@Test func skillDocumentReflectsBaseURLForEveryEndpoint() throws {
+    let markdown = SkillDocument.markdown(baseURL: "http://localhost:9090")
+
+    #expect(markdown.hasPrefix("# OpenMac Skills"))
+    #expect(markdown.contains("**Base URL:** `http://localhost:9090`"))
+
+    // Every endpoint's address must be rendered against the supplied base URL.
+    for endpoint in APIEndpoint.all {
+        #expect(markdown.contains("`http://localhost:9090\(endpoint.path)`"))
+    }
+}
+
+@Test func skillDocumentTracksPortChanges() throws {
+    let other = SkillDocument.markdown(baseURL: "http://localhost:1234")
+
+    #expect(other.contains("http://localhost:1234/api/ocr"))
+    #expect(other.contains("http://localhost:1234/SKILL.md"))
+    #expect(!other.contains("localhost:9090"))
+}
+
+@Test func skillDocumentTrimsTrailingSlashInBaseURL() throws {
+    let markdown = SkillDocument.markdown(baseURL: "http://localhost:8080/")
+
+    #expect(markdown.contains("http://localhost:8080/api/tts"))
+    #expect(!markdown.contains("localhost:8080//api"))
+}
+
+@Test func skillDocumentMarksGetOnlyEndpoints() throws {
+    let skill = try #require(APIEndpoint.all.first { $0.path == "/SKILL.md" })
+
+    #expect(skill.supportedMethods == ["GET"])
+}
+
+@Test func skillDocumentMarksDualMethodEndpoints() throws {
+    let ocr = try #require(APIEndpoint.all.first { $0.path == "/api/ocr" })
+
+    #expect(ocr.supportedMethods == ["GET", "POST"])
 }
