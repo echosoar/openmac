@@ -4,6 +4,7 @@ import AVFoundation
 import Foundation
 import ImageIO
 import Network
+import ServiceManagement
 import SwiftUI
 import Translation
 import Vision
@@ -20,6 +21,15 @@ final class OpenMacAppModel: ObservableObject {
     @Published var isEnabled = false
     @Published var isPresentingError = false
     @Published private(set) var errorMessage = ""
+    @Published var launchAtLogin = LaunchAtLoginService.isEnabled {
+        didSet {
+            LaunchAtLoginService.setEnabled(launchAtLogin)
+        }
+    }
+    @Published var isCheckingUpdate = false
+    @Published var updateInfo: UpdateInfo?
+    @Published var isPresentingUpdateAlert = false
+    @Published var isPresentingUpToDateAlert = false
 
     private var server: OpenMacHTTPServer?
 
@@ -85,6 +95,117 @@ final class OpenMacAppModel: ObservableObject {
         }
 
         return port
+    }
+
+    /// Fetches the latest GitHub release and compares its version with the
+    /// running app's version. When a newer version is found, populates
+    /// `updateInfo` and presents the update alert.
+    func checkForUpdates() {
+        guard !isCheckingUpdate else { return }
+        isCheckingUpdate = true
+        Task { @MainActor [weak self] in
+            defer { self?.isCheckingUpdate = false }
+            do {
+                let info = try await UpdateChecker.fetchLatestRelease()
+                guard let self else { return }
+                if info.version != UpdateChecker.localVersion() {
+                    self.updateInfo = info
+                    self.isPresentingUpdateAlert = true
+                } else {
+                    self.updateInfo = nil
+                    self.isPresentingUpToDateAlert = true
+                }
+            } catch {
+                self?.updateInfo = nil
+            }
+        }
+    }
+
+    /// Opens the GitHub releases page in the default browser.
+    func openReleasesPage() {
+        if let url = URL(string: UpdateChecker.releasesPageURL) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+}
+
+/// Manages "Launch at Login" via `SMAppService` (macOS 13+). The enabled state
+/// is persisted by the system, so the app only needs to register/unregister.
+enum LaunchAtLoginService {
+    static var isEnabled: Bool {
+        SMAppService.mainApp.status == .enabled
+    }
+
+    static func setEnabled(_ enabled: Bool) {
+        do {
+            if enabled {
+                if SMAppService.mainApp.status != .enabled {
+                    try SMAppService.mainApp.register()
+                }
+            } else {
+                if SMAppService.mainApp.status == .enabled {
+                    try SMAppService.mainApp.unregister()
+                }
+            }
+        } catch {
+            openmacLog("Launch at login toggle failed: \(error.localizedDescription)")
+        }
+    }
+}
+
+/// Information about a remote GitHub release.
+struct UpdateInfo: Equatable {
+    let version: String
+    let htmlURL: String
+}
+
+/// Fetches the latest release from GitHub and parses its version from the
+/// release name/title (e.g. "OpenMac 0.1.0" -> "0.1.0").
+enum UpdateChecker {
+    static let releasesPageURL = "https://github.com/echosoar/openmac/releases"
+
+    private static let apiURL = URL(string: "https://api.github.com/repos/echosoar/openmac/releases/latest")!
+
+    /// The running app's marketing version (`CFBundleShortVersionString`),
+    /// falling back to `0.0.0` when unavailable.
+    static func localVersion() -> String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+    }
+
+    static func fetchLatestRelease() async throws -> UpdateInfo {
+        let (data, response) = try await URLSession.shared.data(from: apiURL)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw APIRequestError.internalError("Unable to fetch latest release")
+        }
+
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw APIRequestError.internalError("Invalid release payload")
+        }
+
+        // The release name typically looks like "OpenMac 0.1.0"; fall back to
+        // the tag name ("v0.1.0") when the name is missing or unparseable.
+        let name = (object["name"] as? String) ?? ""
+        let tag = (object["tag_name"] as? String) ?? ""
+        let htmlURL = (object["html_url"] as? String) ?? releasesPageURL
+
+        let version = parseVersion(from: name) ?? parseVersion(from: tag)
+        guard let version else {
+            throw APIRequestError.internalError("Unable to parse release version")
+        }
+
+        return UpdateInfo(version: version, htmlURL: htmlURL)
+    }
+
+    /// Extracts a `x.y.z` style version string from a free-form title/tag.
+    private static func parseVersion(from text: String) -> String? {
+        let pattern = "\\d+\\.\\d+(?:\\.\\d+)?"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(text.startIndex..., in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              let matchRange = Range(match.range, in: text) else {
+            return nil
+        }
+        return String(text[matchRange])
     }
 }
 
@@ -1031,11 +1152,12 @@ private struct TranslationBridgeView: View {
 
 struct OpenMacView: View {
     @EnvironmentObject private var model: OpenMacAppModel
+    @State private var selectedTab = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                Text("APIs")
+                Text("OpenMac")
                     .font(.headline)
                 Spacer()
                 TextField("Port", text: $model.portText)
@@ -1050,15 +1172,27 @@ struct OpenMacView: View {
                 .toggleStyle(.switch)
             }
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(APIEndpoint.all) { endpoint in
-                        APIEndpointRow(endpoint: endpoint, port: model.portText)
-                    }
-                }
-                .padding(.trailing, 2)
+            Picker("", selection: $selectedTab) {
+                Text("APIs").tag(0)
+                Text("Config").tag(1)
             }
-            .frame(minHeight: 260)
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            if selectedTab == 0 {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(APIEndpoint.all) { endpoint in
+                            APIEndpointRow(endpoint: endpoint, port: model.portText)
+                        }
+                    }
+                    .padding(.trailing, 2)
+                }
+                .frame(minHeight: 260)
+            } else {
+                ConfigView()
+                    .frame(minHeight: 260)
+            }
         }
         .padding(16)
         .frame(width: 440)
@@ -1068,6 +1202,74 @@ struct OpenMacView: View {
         } message: {
             Text(model.errorMessage)
         }
+        .alert("Update Available", isPresented: $model.isPresentingUpdateAlert) {
+            if let info = model.updateInfo {
+                Button("Download") { model.openReleasesPage() }
+                Button("Later", role: .cancel) { }
+            } else {
+                Button("OK", role: .cancel) { }
+            }
+        } message: {
+            if let info = model.updateInfo {
+                Text("A new version \(info.version) is available.")
+            }
+        }
+        .alert("Up to Date", isPresented: $model.isPresentingUpToDateAlert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("You're already using the latest version.")
+        }
+    }
+}
+
+private struct ConfigView: View {
+    @EnvironmentObject private var model: OpenMacAppModel
+
+    private let repoURL = URL(string: "https://github.com/echosoar/openmac")!
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 8) {
+                Text("Check Update")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Button(action: model.checkForUpdates) {
+                    if model.isCheckingUpdate {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Text("Check")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(model.isCheckingUpdate)
+            }
+
+            Divider()
+
+            Toggle("Launch at Login", isOn: $model.launchAtLogin)
+                .toggleStyle(.switch)
+
+            Divider()
+
+            HStack(spacing: 6) {
+                Text("About")
+                    .font(.subheadline.weight(.semibold))
+                Text("v\(UpdateChecker.localVersion())")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(action: { NSWorkspace.shared.open(repoURL) }) {
+                    Text("https://github.com/echosoar/openmac")
+                        .underline()
+                        .foregroundColor(.accentColor)
+                }
+                .buttonStyle(.plain)
+            }
+
+            Spacer()
+        }
+        .padding(4)
     }
 }
 
