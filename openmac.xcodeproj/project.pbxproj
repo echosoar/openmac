@@ -10,6 +10,8 @@
 		A1B2C3D4E5F6000000000001 /* openmac.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6000000000011 /* openmac.swift */; };
 		A1B2C3D4E5F6000000000002 /* OpenMacCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6000000000012 /* OpenMacCore.swift */; };
 		A1B2C3D4E5F6000000000003 /* OpenMacServer_macOS.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6000000000013 /* OpenMacServer_macOS.swift */; };
+		A1B2C3D4E5F6000000000004 /* BrowserAutomationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6000000000015 /* BrowserAutomationService.swift */; };
+		A1B2C3D4E5F6000000000005 /* browser-use.js in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6000000000016 /* browser-use.js */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -17,6 +19,8 @@
 		A1B2C3D4E5F6000000000012 /* OpenMacCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenMacCore.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F6000000000013 /* OpenMacServer_macOS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenMacServer_macOS.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F6000000000014 /* openmac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = openmac.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1B2C3D4E5F6000000000015 /* BrowserAutomationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserAutomationService.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F6000000000016 /* browser-use.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = browser-use.js; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -44,9 +48,19 @@
 				A1B2C3D4E5F6000000000011 /* openmac.swift */,
 				A1B2C3D4E5F6000000000012 /* OpenMacCore.swift */,
 				A1B2C3D4E5F6000000000013 /* OpenMacServer_macOS.swift */,
+				A1B2C3D4E5F6000000000015 /* BrowserAutomationService.swift */,
+				A1B2C3D4E5F6000000000017 /* Resources */,
 			);
 			path = Sources/openmac;
 			sourceTree = SOURCE_ROOT;
+		};
+		A1B2C3D4E5F6000000000017 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3D4E5F6000000000016 /* browser-use.js */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
 		};
 		A1B2C3D4E5F6000000000033 /* Products */ = {
 			isa = PBXGroup;
@@ -114,6 +128,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1B2C3D4E5F6000000000005 /* browser-use.js in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -127,6 +142,7 @@
 				A1B2C3D4E5F6000000000002 /* OpenMacCore.swift in Sources */,
 				A1B2C3D4E5F6000000000003 /* OpenMacServer_macOS.swift in Sources */,
 				A1B2C3D4E5F6000000000001 /* openmac.swift in Sources */,
+				A1B2C3D4E5F6000000000004 /* BrowserAutomationService.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

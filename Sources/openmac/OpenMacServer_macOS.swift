@@ -310,6 +310,24 @@ private struct OpenMacRequestRouter {
                 data = try await handleWebContent(request)
             case "/api/search":
                 data = try await handleSearch(request)
+            case "/api/browser/open":
+                data = try await handleBrowserOpen(request)
+            case "/api/browser/close":
+                data = try await handleBrowserClose(request)
+            case "/api/browser/snap":
+                data = try await handleBrowserSnap(request)
+            case "/api/browser/click":
+                data = try await handleBrowserClick(request)
+            case "/api/browser/input":
+                data = try await handleBrowserInput(request)
+            case "/api/browser/press":
+                data = try await handleBrowserPress(request)
+            case "/api/browser/scroll":
+                data = try await handleBrowserScroll(request)
+            case "/api/browser/exec-script":
+                data = try await handleBrowserExecScript(request)
+            case "/api/browser/get-content":
+                data = try await handleBrowserGetContent(request)
             default:
                 throw APIRequestError.notFound("Unknown path: \(request.path)")
             }
@@ -382,6 +400,114 @@ private struct OpenMacRequestRouter {
             excludeDomains: payload.resolvedExcludeDomains
         )
         return APIResponseData(engines: engines)
+    }
+
+    // MARK: - Browser automation
+
+    private func handleBrowserOpen(_ request: HTTPRequestMessage) async throws -> APIResponseData {
+        let payload = try APIRequestDecoder.decodeBrowserOpenRequest(from: request)
+        let result = try await BrowserAutomationService.shared.open(
+            urlString: payload.url,
+            showWindow: payload.resolvedShowWindow,
+            autoCloseSeconds: payload.autoCloseSeconds ?? 0
+        )
+        return APIResponseData(browser: APIBrowserData(
+            browserId: result.browserId,
+            url: result.url,
+            action: BrowserActionResult(done: true)
+        ))
+    }
+
+    private func handleBrowserClose(_ request: HTTPRequestMessage) async throws -> APIResponseData {
+        let payload = try APIRequestDecoder.decodeBrowserIdRequest(from: request)
+        await BrowserAutomationService.shared.close(browserId: payload.browserId)
+        return APIResponseData(browser: APIBrowserData(action: BrowserActionResult(done: true)))
+    }
+
+    private func handleBrowserSnap(_ request: HTTPRequestMessage) async throws -> APIResponseData {
+        let payload = try APIRequestDecoder.decodeBrowserIdRequest(from: request)
+        let snap = try await BrowserAutomationService.shared.snap(browserId: payload.browserId)
+        let items = Self.wrapSnap(snap)
+        return APIResponseData(browser: APIBrowserData(snap: items))
+    }
+
+    private func handleBrowserClick(_ request: HTTPRequestMessage) async throws -> APIResponseData {
+        let payload = try APIRequestDecoder.decodeBrowserElementRequest(from: request)
+        try await BrowserAutomationService.shared.click(browserId: payload.browserId, elementId: payload.elementId)
+        return APIResponseData(browser: APIBrowserData(action: BrowserActionResult(done: true)))
+    }
+
+    private func handleBrowserInput(_ request: HTTPRequestMessage) async throws -> APIResponseData {
+        let payload = try APIRequestDecoder.decodeBrowserInputRequest(from: request)
+        try await BrowserAutomationService.shared.input(
+            browserId: payload.browserId,
+            elementId: payload.elementId,
+            text: payload.text
+        )
+        return APIResponseData(browser: APIBrowserData(action: BrowserActionResult(done: true)))
+    }
+
+    private func handleBrowserPress(_ request: HTTPRequestMessage) async throws -> APIResponseData {
+        let payload = try APIRequestDecoder.decodeBrowserPressRequest(from: request)
+        try await BrowserAutomationService.shared.press(
+            browserId: payload.browserId,
+            elementId: payload.elementId,
+            keys: payload.keys
+        )
+        return APIResponseData(browser: APIBrowserData(action: BrowserActionResult(done: true)))
+    }
+
+    private func handleBrowserScroll(_ request: HTTPRequestMessage) async throws -> APIResponseData {
+        let payload = try APIRequestDecoder.decodeBrowserScrollRequest(from: request)
+        try await BrowserAutomationService.shared.scroll(
+            browserId: payload.browserId,
+            elementId: payload.elementId,
+            x: payload.x,
+            y: payload.y
+        )
+        return APIResponseData(browser: APIBrowserData(action: BrowserActionResult(done: true)))
+    }
+
+    private func handleBrowserExecScript(_ request: HTTPRequestMessage) async throws -> APIResponseData {
+        let payload = try APIRequestDecoder.decodeBrowserExecScriptRequest(from: request)
+        let content = try await BrowserAutomationService.shared.execScript(
+            browserId: payload.browserId,
+            script: payload.script
+        )
+        return APIResponseData(browser: APIBrowserData(content: content))
+    }
+
+    private func handleBrowserGetContent(_ request: HTTPRequestMessage) async throws -> APIResponseData {
+        let payload = try APIRequestDecoder.decodeBrowserGetContentRequest(from: request)
+        let content = try await BrowserAutomationService.shared.getContent(
+            browserId: payload.browserId,
+            elementId: payload.elementId,
+            html: payload.resolvedHtml
+        )
+        return APIResponseData(browser: APIBrowserData(content: content))
+    }
+
+    /// Coerces a raw `window.litePageAgent.snap()` result into the Codable We synthesize `SnapItem`s from whatever keys are
+    /// present, dropping anything unexpected.
+    private static func wrapSnap(_ raw: Any) -> [SnapItem] {
+        guard let array = raw as? [[String: Any]] else {
+            return []
+        }
+        return array.compactMap { dict -> SnapItem? in
+            SnapItem(
+                id: intField(dict, "id"),
+                type: (dict["type"] as? [String]) ?? [],
+                selector: nil,
+                content: (dict["content"] as? String) ?? "",
+                attrs: dict["attrs"] as? String
+            )
+        }
+    }
+
+    private static func intField(_ dict: [String: Any], _ key: String) -> Int? {
+        if let n = dict[key] as? Int { return n }
+        if let n = dict[key] as? NSNumber { return n.intValue }
+        return nil
     }
 }
 

@@ -183,13 +183,61 @@ struct APIResponseData: Encodable, Equatable {
     let lines: [String]?
     let html: String?
     let engines: [SearchEngineResult]?
+    let browser: APIBrowserData?
 
-    init(text: String? = nil, lines: [String]? = nil, html: String? = nil, engines: [SearchEngineResult]? = nil) {
+    init(
+        text: String? = nil,
+        lines: [String]? = nil,
+        html: String? = nil,
+        engines: [SearchEngineResult]? = nil,
+        browser: APIBrowserData? = nil
+    ) {
         self.text = text
         self.lines = lines
         self.html = html
         self.engines = engines
+        self.browser = browser
     }
+}
+
+/// Result of a browser-automation endpoint. Unused fields are omitted from
+/// the encoded JSON. `open` populates `open`; `snap` populates `snap`; the
+/// action endpoints (`click`/`input`/...) populate `action`; `exec-script`
+/// and `get-content` populate `content`.
+struct APIBrowserData: Encodable, Equatable {
+    let browserId: String?
+    let url: String?
+    let snap: [SnapItem]?
+    let action: BrowserActionResult?
+    let content: String?
+
+    init(
+        browserId: String? = nil,
+        url: String? = nil,
+        snap: [SnapItem]? = nil,
+        action: BrowserActionResult? = nil,
+        content: String? = nil
+    ) {
+        self.browserId = browserId
+        self.url = url
+        self.snap = snap
+        self.action = action
+        self.content = content
+    }
+}
+
+/// One element returned by `window.litePageAgent.snap()`.
+struct SnapItem: Encodable, Equatable {
+    let id: Int?
+    let type: [String]
+    let selector: String?
+    let content: String
+    let attrs: String?
+}
+
+/// Generic "done: true" result for the action endpoints (`click`/`input`/...).
+struct BrowserActionResult: Encodable, Equatable {
+    let done: Bool
 }
 
 /// Uniform envelope returned by every endpoint:
@@ -221,6 +269,126 @@ struct TranslateRequestPayload: Codable, Equatable {
             to: trimmedTo
         )
     }
+}
+
+// MARK: - Browser automation payloads
+
+protocol Validatable {
+    func validated() throws -> Self
+}
+
+struct BrowserOpenRequestPayload: Codable, Equatable, Validatable {
+    var url: String
+    /// When `false`, the browser window is created off-screen (headless).
+    var showWindow: Bool?
+    /// Auto-close the browser after this many idle seconds. `0` disables.
+    var autoCloseSeconds: Double?
+
+    var resolvedShowWindow: Bool { showWindow ?? true }
+
+    func validated() throws -> BrowserOpenRequestPayload {
+        let trimmedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedURL.isEmpty else {
+            throw APIRequestError.badRequest("url must not be empty")
+        }
+        if let autoCloseSeconds, autoCloseSeconds < 0 {
+            throw APIRequestError.badRequest("autoCloseSeconds must be non-negative")
+        }
+        return BrowserOpenRequestPayload(
+            url: trimmedURL,
+            showWindow: showWindow,
+            autoCloseSeconds: autoCloseSeconds
+        )
+    }
+}
+
+struct BrowserIdRequestPayload: Codable, Equatable, Validatable {
+    var browserId: String
+
+    func validated() throws -> BrowserIdRequestPayload {
+        let trimmed = browserId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw APIRequestError.badRequest("browserId must not be empty")
+        }
+        return BrowserIdRequestPayload(browserId: trimmed)
+    }
+}
+
+struct BrowserElementRequestPayload: Codable, Equatable, Validatable {
+    var browserId: String
+    var elementId: Int
+
+    func validated() throws -> BrowserElementRequestPayload {
+        let trimmed = browserId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw APIRequestError.badRequest("browserId must not be empty")
+        }
+        return BrowserElementRequestPayload(browserId: trimmed, elementId: elementId)
+    }
+}
+
+struct BrowserInputRequestPayload: Codable, Equatable, Validatable {
+    var browserId: String
+    var elementId: Int
+    var text: String
+
+    func validated() throws -> BrowserInputRequestPayload {
+        let trimmed = browserId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw APIRequestError.badRequest("browserId must not be empty")
+        }
+        return BrowserInputRequestPayload(browserId: trimmed, elementId: elementId, text: text)
+    }
+}
+
+struct BrowserPressRequestPayload: Codable, Equatable, Validatable {
+    var browserId: String
+    var elementId: Int
+    var keys: [String]
+
+    func validated() throws -> BrowserPressRequestPayload {
+        let trimmed = browserId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw APIRequestError.badRequest("browserId must not be empty")
+        }
+        guard !keys.isEmpty else {
+            throw APIRequestError.badRequest("keys must not be empty")
+        }
+        return BrowserPressRequestPayload(browserId: trimmed, elementId: elementId, keys: keys)
+    }
+}
+
+struct BrowserScrollRequestPayload: Codable, Equatable {
+    var browserId: String
+    var elementId: Int?
+    var x: Int
+    var y: Int
+}
+
+struct BrowserExecScriptRequestPayload: Codable, Equatable, Validatable {
+    var browserId: String
+    var script: String
+
+    func validated() throws -> BrowserExecScriptRequestPayload {
+        let trimmedId = browserId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedId.isEmpty else {
+            throw APIRequestError.badRequest("browserId must not be empty")
+        }
+        let trimmedScript = script.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedScript.isEmpty else {
+            throw APIRequestError.badRequest("script must not be empty")
+        }
+        return BrowserExecScriptRequestPayload(browserId: trimmedId, script: script)
+    }
+}
+
+struct BrowserGetContentRequestPayload: Codable, Equatable {
+    var browserId: String
+    var elementId: Int?
+    /// When `true`, return inner HTML instead of text content.
+    var html: Bool?
+
+    var resolvedHtml: Bool { html ?? false }
 }
 
 private extension String {
@@ -297,6 +465,118 @@ struct APIEndpoint: Identifiable, Equatable {
               "engines": ["bing", "brave"],
               "count": 3,
               "excludeDomains": ["baidu.com"]
+            }
+            """
+        ),
+        APIEndpoint(
+            name: "Browser Open",
+            method: "POST",
+            path: "/api/browser/open",
+            summary: "Open a URL in a real browser window (WKWebView) with browser-use.js injected. Returns a browserId used by the other browser endpoints. GET supported via ?url=&showWindow=false&autoCloseSeconds=120",
+            requestDemo: """
+            {
+              "url": "https://example.com",
+              "showWindow": true,
+              "autoCloseSeconds": 120
+            }
+            """
+        ),
+        APIEndpoint(
+            name: "Browser Snap",
+            method: "POST",
+            path: "/api/browser/snap",
+            summary: "Snapshot the open page, returning interactable elements with ids/types/content. Cache the snap on the server so click/input/press/scroll can resolve elementId -> selector. GET supported via ?browserId=",
+            requestDemo: """
+            {
+              "browserId": "<id-from-open>"
+            }
+            """
+        ),
+        APIEndpoint(
+            name: "Browser Click",
+            method: "POST",
+            path: "/api/browser/click",
+            summary: "Click the element identified by elementId (from a previous snap). GET supported via ?browserId=&elementId=",
+            requestDemo: """
+            {
+              "browserId": "<id>",
+              "elementId": 1
+            }
+            """
+        ),
+        APIEndpoint(
+            name: "Browser Input",
+            method: "POST",
+            path: "/api/browser/input",
+            summary: "Type text into the element identified by elementId. GET supported via ?browserId=&elementId=&text=",
+            requestDemo: """
+            {
+              "browserId": "<id>",
+              "elementId": 2,
+              "text": "hello world"
+            }
+            """
+        ),
+        APIEndpoint(
+            name: "Browser Press",
+            method: "POST",
+            path: "/api/browser/press",
+            summary: "Dispatch keydown/keypress/keyup for each key in `keys` on the element identified by elementId. GET supported via ?browserId=&elementId=&keys=Enter,Enter",
+            requestDemo: """
+            {
+              "browserId": "<id>",
+              "elementId": 2,
+              "keys": ["Enter"]
+            }
+            """
+        ),
+        APIEndpoint(
+            name: "Browser Scroll",
+            method: "POST",
+            path: "/api/browser/scroll",
+            summary: "Scroll by (x, y). When elementId is omitted, scrolls the window. GET supported via ?browserId=&x=0&y=400&elementId=3",
+            requestDemo: """
+            {
+              "browserId": "<id>",
+              "elementId": 3,
+              "x": 0,
+              "y": 400
+            }
+            """
+        ),
+        APIEndpoint(
+            name: "Browser Exec Script",
+            method: "POST",
+            path: "/api/browser/exec-script",
+            summary: "Run an arbitrary JS string in the page and return its stringified result. GET supported via ?browserId=&script=...",
+            requestDemo: """
+            {
+              "browserId": "<id>",
+              "script": "document.title"
+            }
+            """
+        ),
+        APIEndpoint(
+            name: "Browser Get Content",
+            method: "POST",
+            path: "/api/browser/get-content",
+            summary: "Return the text (or inner HTML when html=true) of elementId, or document.body when elementId is omitted. GET supported via ?browserId=&elementId=&html=true",
+            requestDemo: """
+            {
+              "browserId": "<id>",
+              "elementId": 4,
+              "html": false
+            }
+            """
+        ),
+        APIEndpoint(
+            name: "Browser Close",
+            method: "POST",
+            path: "/api/browser/close",
+            summary: "Close the browser window and release the session. GET supported via ?browserId=",
+            requestDemo: """
+            {
+              "browserId": "<id>"
             }
             """
         )
@@ -543,6 +823,189 @@ enum APIRequestDecoder {
 
     private static func queryItem(named name: String, in queryItems: [URLQueryItem]) -> String? {
         queryItems.first(where: { $0.name == name })?.value?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: - Browser automation decoders
+
+    static func decodeBrowserOpenRequest(from request: HTTPRequestMessage) throws -> BrowserOpenRequestPayload {
+        switch request.method {
+        case .get:
+            guard let url = queryItem(named: "url", in: request.queryItems), !url.isEmpty else {
+                throw APIRequestError.badRequest("GET /api/browser/open requires ?url=")
+            }
+            let showWindow = boolQuery(named: "showWindow", in: request.queryItems) ?? true
+            let autoCloseSeconds = doubleQuery(named: "autoCloseSeconds", in: request.queryItems)
+            return try BrowserOpenRequestPayload(
+                url: url,
+                showWindow: showWindow,
+                autoCloseSeconds: autoCloseSeconds
+            ).validated()
+        case .post:
+            return try tryValidated(BrowserOpenRequestPayload.self, from: request.body)
+        }
+    }
+
+    static func decodeBrowserIdRequest(from request: HTTPRequestMessage) throws -> BrowserIdRequestPayload {
+        switch request.method {
+        case .get:
+            guard let browserId = queryItem(named: "browserId", in: request.queryItems), !browserId.isEmpty else {
+                throw APIRequestError.badRequest("GET request requires ?browserId=")
+            }
+            return try BrowserIdRequestPayload(browserId: browserId).validated()
+        case .post:
+            return try tryValidated(BrowserIdRequestPayload.self, from: request.body)
+        }
+    }
+
+    static func decodeBrowserElementRequest(from request: HTTPRequestMessage) throws -> BrowserElementRequestPayload {
+        switch request.method {
+        case .get:
+            guard let browserId = queryItem(named: "browserId", in: request.queryItems), !browserId.isEmpty else {
+                throw APIRequestError.badRequest("GET request requires ?browserId=")
+            }
+            guard let elementIdString = queryItem(named: "elementId", in: request.queryItems),
+                  let elementId = Int(elementIdString) else {
+                throw APIRequestError.badRequest("GET request requires ?elementId=<int>")
+            }
+            return try BrowserElementRequestPayload(browserId: browserId, elementId: elementId).validated()
+        case .post:
+            return try tryValidated(BrowserElementRequestPayload.self, from: request.body)
+        }
+    }
+
+    static func decodeBrowserInputRequest(from request: HTTPRequestMessage) throws -> BrowserInputRequestPayload {
+        switch request.method {
+        case .get:
+            guard let browserId = queryItem(named: "browserId", in: request.queryItems), !browserId.isEmpty else {
+                throw APIRequestError.badRequest("GET request requires ?browserId=")
+            }
+            guard let elementIdString = queryItem(named: "elementId", in: request.queryItems),
+                  let elementId = Int(elementIdString) else {
+                throw APIRequestError.badRequest("GET request requires ?elementId=<int>")
+            }
+            guard let text = queryItem(named: "text", in: request.queryItems), !text.isEmpty else {
+                throw APIRequestError.badRequest("GET request requires ?text=")
+            }
+            return try BrowserInputRequestPayload(browserId: browserId, elementId: elementId, text: text).validated()
+        case .post:
+            return try tryValidated(BrowserInputRequestPayload.self, from: request.body)
+        }
+    }
+
+    static func decodeBrowserPressRequest(from request: HTTPRequestMessage) throws -> BrowserPressRequestPayload {
+        switch request.method {
+        case .get:
+            guard let browserId = queryItem(named: "browserId", in: request.queryItems), !browserId.isEmpty else {
+                throw APIRequestError.badRequest("GET request requires ?browserId=")
+            }
+            guard let elementIdString = queryItem(named: "elementId", in: request.queryItems),
+                  let elementId = Int(elementIdString) else {
+                throw APIRequestError.badRequest("GET request requires ?elementId=<int>")
+            }
+            guard let keysString = queryItem(named: "keys", in: request.queryItems), !keysString.isEmpty else {
+                throw APIRequestError.badRequest("GET request requires ?keys=key1,key2")
+            }
+            let keys = keysString.split(separator: ",").map { String($0) }
+            return try BrowserPressRequestPayload(browserId: browserId, elementId: elementId, keys: keys).validated()
+        case .post:
+            return try tryValidated(BrowserPressRequestPayload.self, from: request.body)
+        }
+    }
+
+    static func decodeBrowserScrollRequest(from request: HTTPRequestMessage) throws -> BrowserScrollRequestPayload {
+        let x = try parseIntQuery(named: "x", in: request.queryItems, defaultValue: 0)
+        let y = try parseIntQuery(named: "y", in: request.queryItems, defaultValue: 0)
+        switch request.method {
+        case .get:
+            guard let browserId = queryItem(named: "browserId", in: request.queryItems), !browserId.isEmpty else {
+                throw APIRequestError.badRequest("GET request requires ?browserId=")
+            }
+            let elementId = try parseOptionalIntQuery(named: "elementId", in: request.queryItems)
+            return BrowserScrollRequestPayload(browserId: browserId, elementId: elementId, x: x, y: y)
+        case .post:
+            let payload = try decodeJSON(BrowserScrollRequestPayload.self, from: request.body)
+            guard !payload.browserId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw APIRequestError.badRequest("browserId must not be empty")
+            }
+            return BrowserScrollRequestPayload(
+                browserId: payload.browserId.trimmingCharacters(in: .whitespacesAndNewlines),
+                elementId: payload.elementId,
+                x: payload.x,
+                y: payload.y
+            )
+        }
+    }
+
+    static func decodeBrowserExecScriptRequest(from request: HTTPRequestMessage) throws -> BrowserExecScriptRequestPayload {
+        switch request.method {
+        case .get:
+            guard let browserId = queryItem(named: "browserId", in: request.queryItems), !browserId.isEmpty else {
+                throw APIRequestError.badRequest("GET request requires ?browserId=")
+            }
+            guard let script = queryItem(named: "script", in: request.queryItems), !script.isEmpty else {
+                throw APIRequestError.badRequest("GET request requires ?script=")
+            }
+            return try BrowserExecScriptRequestPayload(browserId: browserId, script: script).validated()
+        case .post:
+            return try tryValidated(BrowserExecScriptRequestPayload.self, from: request.body)
+        }
+    }
+
+    static func decodeBrowserGetContentRequest(from request: HTTPRequestMessage) throws -> BrowserGetContentRequestPayload {
+        switch request.method {
+        case .get:
+            guard let browserId = queryItem(named: "browserId", in: request.queryItems), !browserId.isEmpty else {
+                throw APIRequestError.badRequest("GET request requires ?browserId=")
+            }
+            let elementId = try parseOptionalIntQuery(named: "elementId", in: request.queryItems)
+            let html = boolQuery(named: "html", in: request.queryItems) ?? false
+            return BrowserGetContentRequestPayload(browserId: browserId, elementId: elementId, html: html)
+        case .post:
+            let payload = try decodeJSON(BrowserGetContentRequestPayload.self, from: request.body)
+            guard !payload.browserId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw APIRequestError.badRequest("browserId must not be empty")
+            }
+            return BrowserGetContentRequestPayload(
+                browserId: payload.browserId.trimmingCharacters(in: .whitespacesAndNewlines),
+                elementId: payload.elementId,
+                html: payload.html
+            )
+        }
+    }
+
+    private static func tryValidated<T>(_ type: T.Type, from body: Data) throws -> T where T: Codable & Equatable & Validatable {
+        let payload = try decodeJSON(type, from: body)
+        return try payload.validated()
+    }
+
+    private static func boolQuery(named name: String, in queryItems: [URLQueryItem]) -> Bool? {
+        guard let value = queryItem(named: name, in: queryItems) else { return nil }
+        switch value.lowercased() {
+        case "true", "1", "yes":
+            return true
+        case "false", "0", "no":
+            return false
+        default:
+            return nil
+        }
+    }
+
+    private static func doubleQuery(named name: String, in queryItems: [URLQueryItem]) -> Double? {
+        queryItem(named: name, in: queryItems).flatMap(Double.init)
+    }
+
+    private static func parseIntQuery(named name: String, in queryItems: [URLQueryItem], defaultValue: Int) throws -> Int {
+        guard let value = queryItem(named: name, in: queryItems) else { return defaultValue }
+        if let int = Int(value) { return int }
+        if let double = Double(value) { return Int(double) }
+        throw APIRequestError.badRequest("\(name) must be an integer")
+    }
+
+    private static func parseOptionalIntQuery(named name: String, in queryItems: [URLQueryItem]) throws -> Int? {
+        guard let value = queryItem(named: name, in: queryItems) else { return nil }
+        if let int = Int(value) { return int }
+        if let double = Double(value) { return Int(double) }
+        throw APIRequestError.badRequest("\(name) must be an integer")
     }
 }
 

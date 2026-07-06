@@ -33,3 +33,19 @@ xcodebuild -project openmac.xcodeproj -scheme openmac -configuration Debug CODE_
 - `GET /SKILL.md`
   - Returns a Markdown "skill" document that describes every endpoint and how to call it (methods, URLs, example bodies, and `curl` examples)
   - The server's configured port is filled into all example URLs automatically, so the document is ready to hand to an AI agent or paste into docs
+
+## Browser automation
+
+Open a URL in a real `WKWebView` window with `browser-use.js` injected (exposes `window.litePageAgent`), then drive the page through a stateless JSON API. Every endpoint shares the standard response envelope, supports both `POST` (JSON) and `GET` (query params), and addresses an open session by the `browserId` returned from `/api/browser/open`.
+
+- `POST /api/browser/open` with JSON `{ "url": "https://example.com", "showWindow": true, "autoCloseSeconds": 120 }` — opens the page and returns `{ "browser": { "browserId": "...", "url": "...", "action": { "done": true } } }`. `showWindow=false` runs headless; `autoCloseSeconds=0` (default) disables the idle auto-close timer.
+- `POST /api/browser/snap` with JSON `{ "browserId": "<id>" }` — returns `{ "browser": { "snap": [{ "id": 1, "type": ["click"], "content": "Sign in", "attrs": "href:..." }, ...] } }`. The full snap (with selectors) is cached server-side so later calls resolve `elementId` to a CSS selector.
+- `POST /api/browser/click` — `{ "browserId", "elementId" }`
+- `POST /api/browser/input` — `{ "browserId", "elementId", "text" }`
+- `POST /api/browser/press` — `{ "browserId", "elementId", "keys": ["Enter"] }` (dispatches keydown/keypress/keyup for each key)
+- `POST /api/browser/scroll` — `{ "browserId", "elementId"?, "x", "y" }`; when `elementId` is omitted the window is scrolled
+- `POST /api/browser/exec-script` — `{ "browserId", "script" }` runs arbitrary JS and returns `{ "browser": { "content": "..." } }`
+- `POST /api/browser/get-content` — `{ "browserId", "elementId"?, "html": false }` returns the text content (or inner HTML when `html=true`) of `elementId`, or `document.body` when `elementId` is omitted
+- `POST /api/browser/close` — `{ "browserId" }` closes the window and releases the session
+
+All browser endpoints have `GET` equivalents using query parameters (e.g. `/api/browser/open?url=...&showWindow=false`, `/api/browser/click?browserId=...&elementId=1`).
