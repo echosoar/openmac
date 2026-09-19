@@ -158,6 +158,53 @@ curl -X POST "http://localhost:8080/api/web-content" \
 
 `data.html` contains the rendered outer HTML of the document.
 
+### Web Search — `POST|GET /api/search`
+
+Searches all engines enabled in **Config → Web Search Engines** and combines normalized results. Bing, Google, DuckDuckGo, and Brave are enabled by default; Wikipedia (Chinese site) and arXiv can be enabled from the same multi-select menu. OpenMac searches at most three engines at a time, waits up to 10 seconds per engine, and returns up to three results per successful engine. A failure from one engine does not discard results returned by another engine.
+
+**GET**
+
+```bash
+curl "http://localhost:8080/api/search?s=Swift%20concurrency"
+```
+
+| Parameter | Required | Description |
+|---|---|---|
+| `s` | yes | Search query. |
+
+**POST**
+
+```bash
+curl -X POST "http://localhost:8080/api/search" \
+  -H "Content-Type: application/json" \
+  -d '{"s":"Swift concurrency"}'
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `s` | string | yes | Search query. |
+
+**Response**
+
+```json
+{
+  "success": true,
+  "timeCost": 1450,
+  "data": {
+    "list": [
+      {
+        "title": "The Swift Programming Language",
+        "description": "Official Swift documentation.",
+        "url": "https://www.swift.org/documentation/"
+      }
+    ]
+  },
+  "message": ""
+}
+```
+
+`data.list` is a flattened list of the `{ title, description, url }` results returned by all successful, enabled search engines.
+
 ### Face Detection — `POST|GET /api/face`
 
 Detects faces using Vision and returns bounding boxes, facial landmarks, and a feature vector per face. Set `draw=true` to also receive an annotated image.

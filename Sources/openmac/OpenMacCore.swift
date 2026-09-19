@@ -136,6 +136,69 @@ struct WebContentRequestPayload: Codable, Equatable {
     }
 }
 
+/// Search engines supported by `/api/search`. Values are persisted as raw
+/// strings so future versions can safely ignore engines they no longer support.
+enum SearchEngine: String, CaseIterable, Codable, Identifiable {
+    case bing
+    case google
+    case duckduckgo
+    case brave
+    case wikipedia
+    case arxiv
+
+    static let defaultEnabled: Set<SearchEngine> = [.bing, .google, .duckduckgo, .brave]
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .bing: return "Bing"
+        case .google: return "Google"
+        case .duckduckgo: return "DuckDuckGo"
+        case .brave: return "Brave"
+        case .wikipedia: return "Wikipedia"
+        case .arxiv: return "arXiv"
+        }
+    }
+}
+
+/// Persists the enabled search engines configured in the app. Absence of a
+/// stored value represents the initial installation and enables the four
+/// default engines; an explicitly stored empty list remains empty.
+enum SearchEngineConfiguration {
+    private static let userDefaultsKey = "enabledSearchEngines"
+
+    static func enabledEngines(in defaults: UserDefaults = .standard) -> Set<SearchEngine> {
+        guard let stored = defaults.stringArray(forKey: userDefaultsKey) else {
+            return SearchEngine.defaultEnabled
+        }
+
+        return Set(stored.compactMap(SearchEngine.init(rawValue:)))
+    }
+
+    static func save(_ engines: Set<SearchEngine>, in defaults: UserDefaults = .standard) {
+        defaults.set(engines.map(\.rawValue).sorted(), forKey: userDefaultsKey)
+    }
+}
+
+struct SearchRequestPayload: Codable, Equatable {
+    var s: String
+
+    func validated() throws -> SearchRequestPayload {
+        let query = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            throw APIRequestError.badRequest("s must not be empty")
+        }
+        return SearchRequestPayload(s: query)
+    }
+}
+
+struct SearchResultItem: Encodable, Equatable {
+    let title: String
+    let description: String
+    let url: String
+}
+
 struct HTTPRequestMessage: Equatable {
     var method: HTTPMethod
     var target: String
@@ -191,6 +254,7 @@ struct APIResponseData: Encodable, Equatable {
     let barcodes: [BarcodeObservation]?
     let audio: String?
     let image: String?
+    let list: [SearchResultItem]?
 
     init(
         text: String? = nil,
@@ -199,7 +263,8 @@ struct APIResponseData: Encodable, Equatable {
         faces: [FaceObservation]? = nil,
         barcodes: [BarcodeObservation]? = nil,
         audio: String? = nil,
-        image: String? = nil
+        image: String? = nil,
+        list: [SearchResultItem]? = nil
     ) {
         self.text = text
         self.lines = lines
@@ -208,6 +273,7 @@ struct APIResponseData: Encodable, Equatable {
         self.barcodes = barcodes
         self.audio = audio
         self.image = image
+        self.list = list
     }
 }
 
@@ -589,6 +655,49 @@ struct APIEndpoint: Identifiable, Equatable {
             """
         ),
         APIEndpoint(
+            name: "Web Search",
+            method: "POST",
+            path: "/api/search",
+            summary: "Search selected engines concurrently. Configure enabled engines in Config; GET supported via ?s=.",
+            requestDemo: """
+            {
+              "s": "Swift concurrency"
+            }
+            """,
+            details: "Searches every engine enabled in Config in parallel (up to three at a time): Bing, Google, DuckDuckGo, Brave, Wikipedia, and arXiv. Bing, Google, DuckDuckGo, and Brave are enabled by default. Each enabled engine returns up to three results; engine failures do not discard successful results from other engines.",
+            getParameters: """
+            | Parameter | Required | Description |
+            |---|---|---|
+            | `s` | yes | Search query. |
+            """,
+            getExampleQuery: "s=Swift%20concurrency",
+            postParameters: """
+            | Field | Type | Required | Description |
+            |---|---|---|---|
+            | `s` | string | yes | Search query. |
+            """,
+            responseFormat: """
+            `data.list` contains normalized results from all successfully searched engines. Each item has `title`, `description`, and `url`.
+
+            ```json
+            {
+              "success": true,
+              "timeCost": 1450,
+              "data": {
+                "list": [
+                  {
+                    "title": "The Swift Programming Language",
+                    "description": "Official Swift documentation.",
+                    "url": "https://www.swift.org/documentation/"
+                  }
+                ]
+              },
+              "message": ""
+            }
+            ```
+            """
+        ),
+        APIEndpoint(
             name: "Skill Documentation",
             method: "GET",
             path: "/SKILL.md",
@@ -878,6 +987,18 @@ enum APIRequestDecoder {
         case .post:
             let payload = try decodeJSON(TranslateRequestPayload.self, from: request.body)
             return try payload.validated()
+        }
+    }
+
+    static func decodeSearchRequest(from request: HTTPRequestMessage) throws -> SearchRequestPayload {
+        switch request.method {
+        case .get:
+            guard let query = queryItem(named: "s", in: request.queryItems) else {
+                throw APIRequestError.badRequest("GET /api/search requires ?s=")
+            }
+            return try SearchRequestPayload(s: query).validated()
+        case .post:
+            return try decodeJSON(SearchRequestPayload.self, from: request.body).validated()
         }
     }
 
