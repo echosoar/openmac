@@ -388,83 +388,55 @@ struct APIEndpoint: Identifiable, Equatable {
 
     static let all: [APIEndpoint] = [
         APIEndpoint(
-            name: "OCR / Text Recognition",
-            method: "POST",
-            path: "/api/ocr",
-            summary: "Recognize text in an image. Provide exactly one of url / base64 / file. GET supported via ?url=",
-            requestDemo: """
-            {
-              "url": "https://example.com/image.png"
-            }
-            """,
-            details: "Recognizes text in an image using the Vision framework (`VNRecognizeTextRequest`, accurate recognition level with language correction). Provide the image as a URL, a base64 string, or a local file path — exactly one source.",
-            getParameters: """
-            | Parameter | Required | Description |
-            |---|---|---|
-            | `url` | yes | Publicly reachable image URL to download and analyze. |
-            """,
-            getExampleQuery: "url=https://example.com/image.png",
-            postParameters: """
-            JSON body with **exactly one** of the following fields:
-
-            | Field | Type | Description |
-            |---|---|---|
-            | `url` | string | Image URL to download. |
-            | `base64` | string | Base64-encoded image data (a `data:` URI prefix is allowed). |
-            | `file` | string | Absolute path to a local image file. |
-            """,
-            responseFormat: """
-            `data.text` is all recognized text joined by newlines; `data.lines` is the per-line array.
-
-            ```json
-            {
-              "success": true,
-              "timeCost": 42,
-              "data": {
-                "text": "line 1\\nline 2",
-                "lines": ["line 1", "line 2"]
-              },
-              "message": ""
-            }
-            ```
-            """
+            name: "Skill Documentation",
+            method: "GET",
+            path: "/SKILL.md",
+            summary: "Return this Markdown describing every endpoint: address, parameters, and response format. Addresses reflect the current host and port.",
+            requestDemo: "(no request body)",
+            details: "Returns this Markdown document describing every available skill/endpoint. The addresses shown reflect the host and port you used to reach the server, so they stay correct when the port changes.",
+            getParameters: "No parameters.",
+            getExampleQuery: nil,
+            postParameters: nil,
+            responseFormat: "Returns `text/markdown` (this document) directly, not the JSON envelope used by the `/api/*` endpoints."
         ),
         APIEndpoint(
-            name: "Translate",
+            name: "Web Search",
             method: "POST",
-            path: "/api/translate",
-            summary: "Translate text with the native macOS Translation framework (macOS 15+). \"from\" is optional. GET supported via ?text=&to=&from=",
+            path: "/api/search",
+            summary: "Search selected engines concurrently. Configure enabled engines in Config; GET supported via ?s=.",
             requestDemo: """
             {
-              "text": "Hello, world",
-              "from": "en",
-              "to": "zh"
+              "s": "Swift concurrency"
             }
             """,
-            details: "Translates text using the native macOS Translation framework. Requires macOS 15 or later (otherwise returns a 500 error). `from` is optional — when omitted the system detects the source language.",
+            details: "Searches every engine enabled in Config in parallel (up to three at a time): Bing, Google, DuckDuckGo, Brave, Wikipedia, and arXiv. Bing, Google, DuckDuckGo, and Brave are enabled by default. Each enabled engine returns up to three results; engine failures do not discard successful results from other engines.",
             getParameters: """
             | Parameter | Required | Description |
             |---|---|---|
-            | `text` | yes | Text to translate. |
-            | `to` | yes | Target language code (e.g. `zh`, `ja`, `fr`). |
-            | `from` | no | Source language code; auto-detected when omitted. |
+            | `s` | yes | Search query. |
             """,
-            getExampleQuery: "text=Hello,%20world&from=en&to=zh",
+            getExampleQuery: "s=Swift%20concurrency",
             postParameters: """
             | Field | Type | Required | Description |
             |---|---|---|---|
-            | `text` | string | yes | Text to translate. |
-            | `to` | string | yes | Target language code. |
-            | `from` | string | no | Source language code; auto-detected when omitted. |
+            | `s` | string | yes | Search query. |
             """,
             responseFormat: """
-            `data.text` holds the translated text.
+            `data.list` contains normalized results from all successfully searched engines. Each item has `title`, `description`, and `url`.
 
             ```json
             {
               "success": true,
-              "timeCost": 88,
-              "data": { "text": "你好，世界" },
+              "timeCost": 1450,
+              "data": {
+                "list": [
+                  {
+                    "title": "The Swift Programming Language",
+                    "description": "Official Swift documentation.",
+                    "url": "https://www.swift.org/documentation/"
+                  }
+                ]
+              },
               "message": ""
             }
             ```
@@ -508,6 +480,48 @@ struct APIEndpoint: Identifiable, Equatable {
               "success": true,
               "timeCost": 1203,
               "data": { "html": "<!doctype html>..." },
+              "message": ""
+            }
+            ```
+            """
+        ),
+        APIEndpoint(
+            name: "OCR / Text Recognition",
+            method: "POST",
+            path: "/api/ocr",
+            summary: "Recognize text in an image. Provide exactly one of url / base64 / file. GET supported via ?url=",
+            requestDemo: """
+            {
+              "url": "https://example.com/image.png"
+            }
+            """,
+            details: "Recognizes text in an image using the Vision framework (`VNRecognizeTextRequest`, accurate recognition level with language correction). Provide the image as a URL, a base64 string, or a local file path — exactly one source.",
+            getParameters: """
+            | Parameter | Required | Description |
+            |---|---|---|
+            | `url` | yes | Publicly reachable image URL to download and analyze. |
+            """,
+            getExampleQuery: "url=https://example.com/image.png",
+            postParameters: """
+            JSON body with **exactly one** of the following fields:
+
+            | Field | Type | Description |
+            |---|---|---|
+            | `url` | string | Image URL to download. |
+            | `base64` | string | Base64-encoded image data (a `data:` URI prefix is allowed). |
+            | `file` | string | Absolute path to a local image file. |
+            """,
+            responseFormat: """
+            `data.text` is all recognized text joined by newlines; `data.lines` is the per-line array.
+
+            ```json
+            {
+              "success": true,
+              "timeCost": 42,
+              "data": {
+                "text": "line 1\\nline 2",
+                "lines": ["line 1", "line 2"]
+              },
               "message": ""
             }
             ```
@@ -609,6 +623,47 @@ struct APIEndpoint: Identifiable, Equatable {
             """
         ),
         APIEndpoint(
+            name: "Translate",
+            method: "POST",
+            path: "/api/translate",
+            summary: "Translate text with the native macOS Translation framework (macOS 15+). \"from\" is optional. GET supported via ?text=&to=&from=",
+            requestDemo: """
+            {
+              "text": "Hello, world",
+              "from": "en",
+              "to": "zh"
+            }
+            """,
+            details: "Translates text using the native macOS Translation framework. Requires macOS 15 or later (otherwise returns a 500 error). `from` is optional — when omitted the system detects the source language.",
+            getParameters: """
+            | Parameter | Required | Description |
+            |---|---|---|
+            | `text` | yes | Text to translate. |
+            | `to` | yes | Target language code (e.g. `zh`, `ja`, `fr`). |
+            | `from` | no | Source language code; auto-detected when omitted. |
+            """,
+            getExampleQuery: "text=Hello,%20world&from=en&to=zh",
+            postParameters: """
+            | Field | Type | Required | Description |
+            |---|---|---|---|
+            | `text` | string | yes | Text to translate. |
+            | `to` | string | yes | Target language code. |
+            | `from` | string | no | Source language code; auto-detected when omitted. |
+            """,
+            responseFormat: """
+            `data.text` holds the translated text.
+
+            ```json
+            {
+              "success": true,
+              "timeCost": 88,
+              "data": { "text": "你好，世界" },
+              "message": ""
+            }
+            ```
+            """
+        ),
+        APIEndpoint(
             name: "Text to Speech",
             method: "POST",
             path: "/api/tts",
@@ -653,61 +708,6 @@ struct APIEndpoint: Identifiable, Equatable {
             }
             ```
             """
-        ),
-        APIEndpoint(
-            name: "Web Search",
-            method: "POST",
-            path: "/api/search",
-            summary: "Search selected engines concurrently. Configure enabled engines in Config; GET supported via ?s=.",
-            requestDemo: """
-            {
-              "s": "Swift concurrency"
-            }
-            """,
-            details: "Searches every engine enabled in Config in parallel (up to three at a time): Bing, Google, DuckDuckGo, Brave, Wikipedia, and arXiv. Bing, Google, DuckDuckGo, and Brave are enabled by default. Each enabled engine returns up to three results; engine failures do not discard successful results from other engines.",
-            getParameters: """
-            | Parameter | Required | Description |
-            |---|---|---|
-            | `s` | yes | Search query. |
-            """,
-            getExampleQuery: "s=Swift%20concurrency",
-            postParameters: """
-            | Field | Type | Required | Description |
-            |---|---|---|---|
-            | `s` | string | yes | Search query. |
-            """,
-            responseFormat: """
-            `data.list` contains normalized results from all successfully searched engines. Each item has `title`, `description`, and `url`.
-
-            ```json
-            {
-              "success": true,
-              "timeCost": 1450,
-              "data": {
-                "list": [
-                  {
-                    "title": "The Swift Programming Language",
-                    "description": "Official Swift documentation.",
-                    "url": "https://www.swift.org/documentation/"
-                  }
-                ]
-              },
-              "message": ""
-            }
-            ```
-            """
-        ),
-        APIEndpoint(
-            name: "Skill Documentation",
-            method: "GET",
-            path: "/SKILL.md",
-            summary: "Return this Markdown describing every endpoint: address, parameters, and response format. Addresses reflect the current host and port.",
-            requestDemo: "(no request body)",
-            details: "Returns this Markdown document describing every available skill/endpoint. The addresses shown reflect the host and port you used to reach the server, so they stay correct when the port changes.",
-            getParameters: "No parameters.",
-            getExampleQuery: nil,
-            postParameters: nil,
-            responseFormat: "Returns `text/markdown` (this document) directly, not the JSON envelope used by the `/api/*` endpoints."
         )
     ]
 }

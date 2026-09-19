@@ -11,4 +11,6 @@ Build from the command line on macOS:
 
 ```sh
 xcodebuild -project openmac.xcodeproj -scheme openmac -configuration Debug CODE_SIGNING_ALLOWED=NO build
+
+~/Library/Developer/Xcode/DerivedData/openmac-*/Build/Products/Debug/openmac.app/Contents/MacOS/openmac
 ```
