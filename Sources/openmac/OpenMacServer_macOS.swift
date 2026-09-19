@@ -30,6 +30,11 @@ final class OpenMacAppModel: ObservableObject {
     @Published var updateInfo: UpdateInfo?
     @Published var isPresentingUpdateAlert = false
     @Published var isPresentingUpToDateAlert = false
+    @Published var enabledSearchEngines = SearchEngineConfiguration.enabledEngines() {
+        didSet {
+            SearchEngineConfiguration.save(enabledSearchEngines)
+        }
+    }
 
     private var server: OpenMacHTTPServer?
 
@@ -425,6 +430,8 @@ private struct OpenMacRequestRouter {
                 data = try await handleTranslate(request)
             case "/api/web-content":
                 data = try await handleWebContent(request)
+            case "/api/search":
+                data = try await handleSearch(request)
             case "/api/face":
                 data = try await handleFace(request)
             case "/api/qrcode":
@@ -504,6 +511,17 @@ private struct OpenMacRequestRouter {
 
         let html = try await WebContentRenderer().renderHTML(from: url, options: try payload.resolvedOptions())
         return APIResponseData(html: html)
+    }
+
+    private func handleSearch(_ request: HTTPRequestMessage) async throws -> APIResponseData {
+        let payload = try APIRequestDecoder.decodeSearchRequest(from: request)
+        let enabledEngines = SearchEngineConfiguration.enabledEngines()
+        guard !enabledEngines.isEmpty else {
+            throw APIRequestError.badRequest("No search engines are enabled. Enable at least one engine in Config.")
+        }
+
+        let results = try await WebSearchService().search(query: payload.s, engines: enabledEngines)
+        return APIResponseData(list: results)
     }
 
     private func handleFace(_ request: HTTPRequestMessage) async throws -> APIResponseData {
@@ -1082,6 +1100,290 @@ private final class WebContentRenderer: NSObject, WKNavigationDelegate {
     }
 }
 
+private struct WebSearchService {
+    private let maximumConcurrentSearches = 3
+
+    /// Runs the enabled engines in parallel, while allowing at most three
+    /// headless WebViews at once. Individual failures are logged and ignored so
+    /// a search succeeds whenever at least one engine returns results.
+    func search(query: String, engines: Set<SearchEngine>) async throws -> [SearchResultItem] {
+        let selectedEngines = SearchEngine.allCases.filter { engines.contains($0) }
+        guard !selectedEngines.isEmpty else {
+            throw APIRequestError.badRequest("No search engines are enabled. Enable at least one engine in Config.")
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                self.searchConcurrently(
+                    query: query,
+                    engines: selectedEngines,
+                    maximumConcurrentSearches: self.maximumConcurrentSearches,
+                    continuation: continuation
+                )
+            }
+        }
+    }
+
+    private func searchConcurrently(
+        query: String,
+        engines: [SearchEngine],
+        maximumConcurrentSearches: Int,
+        continuation: CheckedContinuation<[SearchResultItem], Error>
+    ) {
+        let group = DispatchGroup()
+        let semaphore = DispatchSemaphore(value: maximumConcurrentSearches)
+        let lock = NSLock()
+        var allResults = [SearchResultItem]()
+        var errors = [String]()
+
+        for engine in engines {
+            semaphore.wait()
+            group.enter()
+
+            Task { @MainActor in
+                defer {
+                    semaphore.signal()
+                    group.leave()
+                }
+
+                do {
+                    let results = try await SearchPageRenderer().search(query: query, engine: engine)
+                    lock.lock()
+                    allResults.append(contentsOf: results)
+                    lock.unlock()
+                    openmacLog("Search \(engine.displayName) returned \(results.count) results")
+                } catch {
+                    lock.lock()
+                    errors.append("\(engine.displayName): \(error.localizedDescription)")
+                    lock.unlock()
+                    openmacLog("Search \(engine.displayName) failed: \(error.localizedDescription)")
+                }
+            }
+        }
+
+        group.notify(queue: .global(qos: .userInitiated)) {
+            lock.lock()
+            let results = allResults
+            let failures = errors
+            lock.unlock()
+
+            if results.isEmpty {
+                let detail = failures.isEmpty ? "No search results found" : failures.joined(separator: "; ")
+                continuation.resume(throwing: APIRequestError.internalError("Search failed: \(detail)"))
+            } else {
+                continuation.resume(returning: results)
+            }
+        }
+    }
+}
+
+/// Loads one result page in an off-screen WebKit view and extracts the
+/// normalized `title` / `description` / `url` fields using engine-specific DOM
+/// selectors, matching RACT's browser-based search approach.
+@MainActor
+private final class SearchPageRenderer: NSObject, WKNavigationDelegate {
+    private let resultCount = 3
+    private let searchTimeout: TimeInterval = 10
+    private let extractionDelay: TimeInterval = 2
+
+    private var webView: WKWebView?
+    private var engine: SearchEngine?
+    private var continuation: CheckedContinuation<[SearchResultItem], Error>?
+    private var timeoutWorkItem: DispatchWorkItem?
+
+    func search(query: String, engine: SearchEngine) async throws -> [SearchResultItem] {
+        let url = try searchURL(query: query, engine: engine)
+        self.engine = engine
+        let configuration = WKWebViewConfiguration()
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15"
+        webView.navigationDelegate = self
+        self.webView = webView
+
+        return try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+            let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: searchTimeout)
+            webView.load(request)
+
+            let timeout = DispatchWorkItem { [weak self] in
+                self?.finish(with: .failure(APIRequestError.internalError("Search timed out")))
+            }
+            self.timeoutWorkItem = timeout
+            DispatchQueue.main.asyncAfter(deadline: .now() + searchTimeout, execute: timeout)
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        finish(with: .failure(error))
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        finish(with: .failure(error))
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + extractionDelay) { [weak self] in
+            self?.extractResults()
+        }
+    }
+
+    private func extractResults() {
+        guard let webView, let engine else { return }
+        let script = extractionScript(for: engine)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let value = try await Self.runJavaScript(script, on: webView)
+                guard let dictionaries = value as? [[String: Any]] else {
+                    throw APIRequestError.internalError("Unable to extract search results")
+                }
+
+                let results = dictionaries.compactMap { dictionary -> SearchResultItem? in
+                    guard let title = dictionary["title"] as? String,
+                          let url = dictionary["url"] as? String,
+                          !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                          !url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        return nil
+                    }
+                    return SearchResultItem(
+                        title: title.trimmingCharacters(in: .whitespacesAndNewlines),
+                        description: (dictionary["description"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                        url: url.trimmingCharacters(in: .whitespacesAndNewlines)
+                    )
+                }
+
+                guard !results.isEmpty else {
+                    throw APIRequestError.internalError("No search results found")
+                }
+                finish(with: .success(results))
+            } catch {
+                finish(with: .failure(error))
+            }
+        }
+    }
+
+    private func searchURL(query: String, engine: SearchEngine) throws -> URL {
+        var components = URLComponents()
+        components.scheme = "https"
+
+        switch engine {
+        case .bing:
+            components.host = "www.bing.com"
+            components.path = "/search"
+            components.queryItems = [URLQueryItem(name: "q", value: query), URLQueryItem(name: "from", value: "HDRSC1")]
+        case .google:
+            components.host = "www.google.com"
+            components.path = "/search"
+            components.queryItems = [URLQueryItem(name: "q", value: query)]
+        case .duckduckgo:
+            components.host = "duckduckgo.com"
+            components.path = "/"
+            components.queryItems = [URLQueryItem(name: "q", value: query)]
+        case .brave:
+            components.host = "search.brave.com"
+            components.path = "/search"
+            components.queryItems = [URLQueryItem(name: "q", value: query), URLQueryItem(name: "source", value: "web")]
+        case .wikipedia:
+            components.host = "zh.wikipedia.org"
+            components.path = "/w/index.php"
+            components.queryItems = [
+                URLQueryItem(name: "search", value: query),
+                URLQueryItem(name: "profile", value: "advanced"),
+                URLQueryItem(name: "fulltext", value: "1"),
+                URLQueryItem(name: "ns0", value: "1")
+            ]
+        case .arxiv:
+            components.host = "arxiv.org"
+            components.path = "/search/"
+            components.queryItems = [
+                URLQueryItem(name: "query", value: query),
+                URLQueryItem(name: "searchtype", value: "all"),
+                URLQueryItem(name: "source", value: "header")
+            ]
+        }
+
+        guard let url = components.url else {
+            throw APIRequestError.internalError("Unable to build search URL")
+        }
+        return url
+    }
+
+    private func extractionScript(for engine: SearchEngine) -> String {
+        let selectors: (result: String, title: String, description: String, link: String)
+        switch engine {
+        case .bing:
+            selectors = (".b_algo", "h2 a", ".b_caption p", "h2 a")
+        case .google:
+            selectors = ("[data-hveid]", "h3", "[data-sncf]", "a")
+        case .duckduckgo:
+            selectors = ("article[data-testid=\\\"result\\\"]", "h2 a", "[data-result=\\\"snippet\\\"]", "h2 a")
+        case .brave:
+            selectors = (".snippet", ".title", ".description", "a")
+        case .wikipedia:
+            selectors = (".mw-search-result", ".mw-search-result-heading a", ".searchresult", ".mw-search-result-heading a")
+        case .arxiv:
+            return """
+            (() => {
+              const results = [];
+              for (const element of document.querySelectorAll('.arxiv-result')) {
+                const title = element.querySelector('.title');
+                const link = element.querySelector('.list-title > a');
+                const authors = element.querySelector('.authors');
+                const abstract = element.querySelector('.abstract-full');
+                if (!title || !link) continue;
+                const description = [authors?.textContent, abstract?.textContent]
+                  .filter(Boolean).join(' ').trim();
+                results.push({ title: title.textContent.trim(), description, url: link.href || '' });
+                if (results.length >= \(resultCount)) break;
+              }
+              return results;
+            })();
+            """
+        }
+
+        return """
+        (() => {
+          const results = [];
+          for (const element of document.querySelectorAll('\(selectors.result)')) {
+            const title = element.querySelector('\(selectors.title)');
+            const link = element.querySelector('\(selectors.link)');
+            const description = element.querySelector('\(selectors.description)');
+            if (!title || !link) continue;
+            results.push({
+              title: title.textContent.trim(),
+              description: description ? description.textContent.trim() : '',
+              url: link.href || ''
+            });
+            if (results.length >= \(resultCount)) break;
+          }
+          return results;
+        })();
+        """
+    }
+
+    private static func runJavaScript(_ script: String, on webView: WKWebView) async throws -> Any? {
+        try await withCheckedThrowingContinuation { continuation in
+            webView.evaluateJavaScript(script) { value, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: value)
+                }
+            }
+        }
+    }
+
+    private func finish(with result: Result<[SearchResultItem], Error>) {
+        guard let continuation else { return }
+        self.continuation = nil
+        timeoutWorkItem?.cancel()
+        timeoutWorkItem = nil
+        webView?.navigationDelegate = nil
+        webView = nil
+        continuation.resume(with: result)
+    }
+}
+
 @available(macOS 15, *)
 private struct TranslationService {
     func translate(_ payload: TranslateRequestPayload) async throws -> String {
@@ -1249,6 +1551,40 @@ private struct ConfigView: View {
 
             Toggle("Launch at Login", isOn: $model.launchAtLogin)
                 .toggleStyle(.switch)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Web Search Engines")
+                    .font(.subheadline.weight(.semibold))
+                Menu {
+                    ForEach(SearchEngine.allCases) { engine in
+                        Toggle(engine.displayName, isOn: Binding(
+                            get: { model.enabledSearchEngines.contains(engine) },
+                            set: { isEnabled in
+                                var engines = model.enabledSearchEngines
+                                if isEnabled {
+                                    engines.insert(engine)
+                                } else {
+                                    engines.remove(engine)
+                                }
+                                model.enabledSearchEngines = engines
+                            }
+                        ))
+                    }
+                } label: {
+                    Label(
+                        "\(model.enabledSearchEngines.count) selected",
+                        systemImage: "chevron.up.chevron.down"
+                    )
+                }
+                .menuStyle(.borderedButton)
+
+                Text("Choose the engines used by /api/search. Bing, Google, DuckDuckGo, and Brave are enabled by default.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             Divider()
 
