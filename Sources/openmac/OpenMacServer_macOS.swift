@@ -49,6 +49,13 @@ final class OpenMacAppModel: ObservableObject {
     func startServer() {
         do {
             let port = try validatedPort()
+            do {
+                let fileURL = try SkillDocument.writeLocalCopy(baseURL: "http://localhost:\(port)")
+                openmacLog("Wrote skill documentation to \(fileURL.path)")
+            } catch {
+                openmacLog("Failed to write local skill documentation: \(error.localizedDescription)")
+            }
+
             let server = try OpenMacHTTPServer(port: port)
             server.stateHandler = { [weak self] state in
                 // Listener state changes arrive on the listener queue; hop to the
@@ -1615,9 +1622,16 @@ private struct APIEndpointRow: View {
 
     @State private var isExpanded = false
     @State private var didCopy = false
+    @State private var didCopyLocalSkillPath = false
 
     private var address: String {
         endpoint.address(host: "localhost", port: port)
+    }
+
+    private var localSkillPath: String {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".openmac/SKILL.md")
+            .path
     }
 
     var body: some View {
@@ -1660,6 +1674,28 @@ private struct APIEndpointRow: View {
                 .help("Copy API address")
             }
 
+            if endpoint.path == "/SKILL.md" {
+                HStack(spacing: 8) {
+                    Text(localSkillPath)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.secondary.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                    Button(action: copyLocalSkillPath) {
+                        Label(didCopyLocalSkillPath ? "Copied" : "Copy", systemImage: didCopyLocalSkillPath ? "checkmark" : "doc.on.doc")
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.bordered)
+                    .help("Copy local SKILL.md path")
+                }
+            }
+
             if endpoint.postParameters != nil {
                 DisclosureGroup(isExpanded: $isExpanded) {
                     Text(endpoint.requestDemo)
@@ -1698,6 +1734,15 @@ private struct APIEndpointRow: View {
         didCopy = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
             didCopy = false
+        }
+    }
+
+    private func copyLocalSkillPath() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(localSkillPath, forType: .string)
+        didCopyLocalSkillPath = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            didCopyLocalSkillPath = false
         }
     }
 }

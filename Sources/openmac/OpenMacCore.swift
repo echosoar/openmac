@@ -736,6 +736,16 @@ enum SkillDocument {
         return sections.joined(separator: "\n\n") + "\n"
     }
 
+    @discardableResult
+    static func writeLocalCopy(baseURL: String, homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) throws -> URL {
+        let directory = homeDirectory.appendingPathComponent(".openmac", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let fileURL = directory.appendingPathComponent("SKILL.md")
+        try Data(markdown(baseURL: baseURL).utf8).write(to: fileURL, options: .atomic)
+        return fileURL
+    }
+
     /// Reads the app's marketing version (`CFBundleShortVersionString`) from the
     /// main bundle, falling back to `0.0.0` when unavailable (e.g. running tests
     /// outside a bundled app).
