@@ -1,6 +1,7 @@
 #if os(macOS)
 import AppKit
 import AVFoundation
+import CoreImage
 import Foundation
 import ImageIO
 import Network
@@ -443,6 +444,8 @@ private struct OpenMacRequestRouter {
                 data = try await handleFace(request)
             case "/api/qrcode":
                 data = try await handleQRCode(request)
+            case "/api/remove-bg":
+                data = try await handleRemoveBackground(request)
             case "/api/tts":
                 data = try await handleTTS(request)
             default:
@@ -543,6 +546,16 @@ private struct OpenMacRequestRouter {
         let imageData = try await ImageDataLoader().load(from: try payload.source())
         let barcodes = try BarcodeDetectionService().detectBarcodes(in: imageData)
         return APIResponseData(barcodes: barcodes)
+    }
+
+    private func handleRemoveBackground(_ request: HTTPRequestMessage) async throws -> APIResponseData {
+        guard #available(macOS 14, *) else {
+            throw APIRequestError.internalError("Background removal requires macOS 14 or later")
+        }
+        let payload = try APIRequestDecoder.decodeImageRequest(from: request, path: request.path)
+        let imageData = try await ImageDataLoader().load(from: try payload.source())
+        let png = try BackgroundRemovalService().removeBackground(from: imageData)
+        return APIResponseData(image: png.base64EncodedString())
     }
 
     private func handleTTS(_ request: HTTPRequestMessage) async throws -> APIResponseData {
@@ -844,6 +857,38 @@ private struct BarcodeDetectionService {
                 boundingBox: BoundingBox(observation.boundingBox)
             )
         }
+    }
+}
+
+@available(macOS 14, *)
+private struct BackgroundRemovalService {
+    func removeBackground(from imageData: Data) throws -> Data {
+        guard let imageSource = CGImageSourceCreateWithData(imageData as CFData, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
+            throw APIRequestError.badRequest("Unable to decode image data")
+        }
+
+        let request = VNGenerateForegroundInstanceMaskRequest()
+        let handler = VNImageRequestHandler(cgImage: cgImage)
+        try handler.perform([request])
+        guard let observation = request.results?.first else {
+            throw APIRequestError.badRequest("No foreground subject found in image")
+        }
+
+        let pixelBuffer = try observation.generateMaskedImage(
+            ofInstances: observation.allInstances,
+            from: handler,
+            croppedToInstancesExtent: false
+        )
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        guard let png = CIContext().pngRepresentation(
+            of: ciImage,
+            format: .RGBA8,
+            colorSpace: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        ) else {
+            throw APIRequestError.internalError("Failed to encode PNG")
+        }
+        return png
     }
 }
 

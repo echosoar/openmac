@@ -623,6 +623,39 @@ struct APIEndpoint: Identifiable, Equatable {
             """
         ),
         APIEndpoint(
+            name: "Remove Background",
+            method: "POST",
+            path: "/api/remove-bg",
+            summary: "Remove an image background with Vision (macOS 14+) and return a transparent-background PNG as base64. Provide exactly one of url / base64 / file. GET supported via ?url=",
+            requestDemo: """
+            {
+              "url": "https://example.com/photo.jpg"
+            }
+            """,
+            details: "Isolates the foreground subject(s) using Vision (`VNGenerateForegroundInstanceMaskRequest`) and returns the full-size image as a PNG with a transparent background. Requires macOS 14 or later (otherwise returns a 500 error); returns 400 if no foreground subject is found.",
+            getParameters: """
+            | Parameter | Required | Description |
+            |---|---|---|
+            | `url` | yes | Publicly reachable image URL to process. |
+            """,
+            getExampleQuery: "url=https://example.com/photo.jpg",
+            postParameters: """
+            JSON body with **exactly one** of `url`, `base64`, or `file` (same as OCR).
+            """,
+            responseFormat: """
+            `data.image` is a base64-encoded PNG (no `data:` prefix) with the background made transparent.
+
+            ```json
+            {
+              "success": true,
+              "timeCost": 520,
+              "data": { "image": "iVBORw0KGgo..." },
+              "message": ""
+            }
+            ```
+            """
+        ),
+        APIEndpoint(
             name: "Translate",
             method: "POST",
             path: "/api/translate",
@@ -720,7 +753,7 @@ enum SkillDocument {
         sections.append("""
         ---
         name: OpenMac
-        description: OpenMac runs a local HTTP server and provides APIs for image OCR recognition, multilingual translation, web page content retrieval, face and facial location recognition, QR code/barcode recognition in images, and text-to-speech (TTS) capabilities. This service is based on the above functions provided by the native macOS system and is completely free without incurring any additional costs.
+        description: OpenMac runs a local HTTP server and provides APIs for image OCR recognition, multilingual translation, web page content retrieval, face and facial location recognition, QR code/barcode recognition in images, image background removal (transparent PNG), and text-to-speech (TTS) capabilities. This service is based on the above functions provided by the native macOS system and is completely free without incurring any additional costs.
         version: \(appVersion())
         ---
 
