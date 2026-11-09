@@ -1,6 +1,7 @@
 #if os(macOS)
 import AppKit
 import AVFoundation
+import CoreImage
 import Foundation
 import ImageIO
 import Network
@@ -49,6 +50,13 @@ final class OpenMacAppModel: ObservableObject {
     func startServer() {
         do {
             let port = try validatedPort()
+            do {
+                let fileURL = try SkillDocument.writeLocalCopy(baseURL: "http://localhost:\(port)")
+                openmacLog("Wrote skill documentation to \(fileURL.path)")
+            } catch {
+                openmacLog("Failed to write local skill documentation: \(error.localizedDescription)")
+            }
+
             let server = try OpenMacHTTPServer(port: port)
             server.stateHandler = { [weak self] state in
                 // Listener state changes arrive on the listener queue; hop to the
@@ -436,6 +444,8 @@ private struct OpenMacRequestRouter {
                 data = try await handleFace(request)
             case "/api/qrcode":
                 data = try await handleQRCode(request)
+            case "/api/remove-bg":
+                data = try await handleRemoveBackground(request)
             case "/api/tts":
                 data = try await handleTTS(request)
             default:
@@ -536,6 +546,16 @@ private struct OpenMacRequestRouter {
         let imageData = try await ImageDataLoader().load(from: try payload.source())
         let barcodes = try BarcodeDetectionService().detectBarcodes(in: imageData)
         return APIResponseData(barcodes: barcodes)
+    }
+
+    private func handleRemoveBackground(_ request: HTTPRequestMessage) async throws -> APIResponseData {
+        guard #available(macOS 14, *) else {
+            throw APIRequestError.internalError("Background removal requires macOS 14 or later")
+        }
+        let payload = try APIRequestDecoder.decodeImageRequest(from: request, path: request.path)
+        let imageData = try await ImageDataLoader().load(from: try payload.source())
+        let png = try BackgroundRemovalService().removeBackground(from: imageData)
+        return APIResponseData(image: png.base64EncodedString())
     }
 
     private func handleTTS(_ request: HTTPRequestMessage) async throws -> APIResponseData {
@@ -837,6 +857,38 @@ private struct BarcodeDetectionService {
                 boundingBox: BoundingBox(observation.boundingBox)
             )
         }
+    }
+}
+
+@available(macOS 14, *)
+private struct BackgroundRemovalService {
+    func removeBackground(from imageData: Data) throws -> Data {
+        guard let imageSource = CGImageSourceCreateWithData(imageData as CFData, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
+            throw APIRequestError.badRequest("Unable to decode image data")
+        }
+
+        let request = VNGenerateForegroundInstanceMaskRequest()
+        let handler = VNImageRequestHandler(cgImage: cgImage)
+        try handler.perform([request])
+        guard let observation = request.results?.first else {
+            throw APIRequestError.badRequest("No foreground subject found in image")
+        }
+
+        let pixelBuffer = try observation.generateMaskedImage(
+            ofInstances: observation.allInstances,
+            from: handler,
+            croppedToInstancesExtent: false
+        )
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        guard let png = CIContext().pngRepresentation(
+            of: ciImage,
+            format: .RGBA8,
+            colorSpace: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        ) else {
+            throw APIRequestError.internalError("Failed to encode PNG")
+        }
+        return png
     }
 }
 
@@ -1615,9 +1667,16 @@ private struct APIEndpointRow: View {
 
     @State private var isExpanded = false
     @State private var didCopy = false
+    @State private var didCopyLocalSkillPath = false
 
     private var address: String {
         endpoint.address(host: "localhost", port: port)
+    }
+
+    private var localSkillPath: String {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".openmac/SKILL.md")
+            .path
     }
 
     var body: some View {
@@ -1660,6 +1719,28 @@ private struct APIEndpointRow: View {
                 .help("Copy API address")
             }
 
+            if endpoint.path == "/SKILL.md" {
+                HStack(spacing: 8) {
+                    Text(localSkillPath)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.secondary.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                    Button(action: copyLocalSkillPath) {
+                        Label(didCopyLocalSkillPath ? "Copied" : "Copy", systemImage: didCopyLocalSkillPath ? "checkmark" : "doc.on.doc")
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.bordered)
+                    .help("Copy local SKILL.md path")
+                }
+            }
+
             if endpoint.postParameters != nil {
                 DisclosureGroup(isExpanded: $isExpanded) {
                     Text(endpoint.requestDemo)
@@ -1698,6 +1779,15 @@ private struct APIEndpointRow: View {
         didCopy = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
             didCopy = false
+        }
+    }
+
+    private func copyLocalSkillPath() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(localSkillPath, forType: .string)
+        didCopyLocalSkillPath = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            didCopyLocalSkillPath = false
         }
     }
 }

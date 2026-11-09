@@ -250,6 +250,19 @@ import Testing
     #expect(!other.contains("localhost:9090"))
 }
 
+@Test func writesSkillDocumentToOpenMacDirectory() throws {
+    let homeDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: homeDirectory) }
+
+    let fileURL = try SkillDocument.writeLocalCopy(baseURL: "http://localhost:8080", homeDirectory: homeDirectory)
+    let markdown = try String(contentsOf: fileURL, encoding: .utf8)
+
+    #expect(fileURL.path == homeDirectory.appendingPathComponent(".openmac/SKILL.md").path)
+    #expect(markdown.contains("**Base URL:** `http://localhost:8080`"))
+    #expect(markdown.contains("http://localhost:8080/api/ocr"))
+}
+
 @Test func skillDocumentTrimsTrailingSlashInBaseURL() throws {
     let markdown = SkillDocument.markdown(baseURL: "http://localhost:8080/")
 
